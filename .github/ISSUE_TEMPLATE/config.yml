@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安装与常见问题
+    url: https://github.com/ZeroClian/stockbar/blob/main/docs/INSTALL.md
+    about: 先查看安装、权限、旧行情及数据说明

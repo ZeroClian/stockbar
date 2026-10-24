@@ -1,0 +1,13 @@
+name: 功能建议
+description: 提出符合轻量速览方向的改进
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 期望的使用方式

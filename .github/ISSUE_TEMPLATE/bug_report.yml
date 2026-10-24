@@ -1,0 +1,23 @@
+name: 问题反馈
+description: 报告可复现的功能或显示问题
+title: "[Bug] "
+body:
+  - type: input
+    id: environment
+    attributes:
+      label: 版本与环境
+      placeholder: "StockBar 1.1.0 / macOS 版本 / Apple 芯片型号"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤与实际结果
+      description: 请描述预期行为；可附已遮挡隐私的截图，勿上传完整持仓文件。
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 行情问题可附证券代码、报价时间和错误提示。

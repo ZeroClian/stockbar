@@ -1,0 +1,20 @@
+.build/
+.build-core/
+.swiftpm/
+.DS_Store
+dist/
+*.xcuserstate
+*.log
+
+# Local development/review history, not part of the public distribution
+docs/superpowers/
+docs/verification/
+docs/verification.md
+docs/*-report.md
+.codex/
+.agents/
+.env
+.env.*
+*.p12
+*.pem
+state.json

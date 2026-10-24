@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Tests
+        run: bash scripts/test.sh
+      - name: Build and package
+        run: bash scripts/package-release.sh
+      - name: Upload installation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: StockBar-${{ runner.arch }}
+          path: |
+            dist/StockBar-*.dmg
+            dist/StockBar-*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
