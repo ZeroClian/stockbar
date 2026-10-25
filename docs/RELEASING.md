@@ -11,11 +11,11 @@
 示例（版本需与 Info.plist 一致）：
 
 ```bash
-git tag -a v1.1.0 -m 'StockBar v1.1.0'
-git push origin v1.1.0
-gh release create v1.1.0 --verify-tag --title 'StockBar v1.1.0 · 隐身速览' \
-  --notes-file docs/releases/v1.1.0.md \
-  dist/StockBar-1.1.0-arm64.dmg dist/StockBar-1.1.0-arm64.zip dist/SHA256SUMS.txt
+git tag -a v1.2.0 -m 'Tickfin v1.2.0'
+git push origin v1.2.0
+gh release create v1.2.0 --verify-tag --title 'Tickfin v1.2.0' \
+  --notes-file docs/releases/v1.2.0.md \
+  dist/Tickfin-1.2.0-arm64.dmg dist/Tickfin-1.2.0-arm64.zip dist/SHA256SUMS.txt
 ```
 
 当前打包脚本使用 ad-hoc 签名，不包含 Apple 凭证，不执行公证。未来若加入 Developer ID 和公证，应使用受保护的发布环境与密钥存储，并同步更新安装说明；不得把证书密码或私钥提交到仓库。

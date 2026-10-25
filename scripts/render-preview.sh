@@ -10,9 +10,11 @@ if [[ ! -f "$build_root/StockCore.build/StockCore.swift.o" ]]; then
     exit 1
 fi
 swiftc -parse-as-library -module-cache-path .build/module-cache -I "$build_root/Modules" \
-    "$build_root/StockCore.build/StockCore.swift.o" \
+    "$build_root"/StockCore.build/*.swift.o \
     Sources/StockBar/AppStore.swift Sources/StockBar/QuoteService.swift \
     Sources/StockBar/NotificationService.swift Sources/StockBar/Styles.swift \
     Sources/StockBar/PanelView.swift Sources/StockBar/Editors.swift \
+    Sources/StockBar/GlobalShortcutService.swift Sources/StockBar/ShortcutSettingsView.swift \
+    Sources/StockBar/RefreshScheduler.swift Sources/StockBar/UpdateChecker.swift Sources/StockBar/UpdateSettingsView.swift \
     scripts/render-preview.swift -o .build/render-preview
 .build/render-preview docs/verification/native-preview

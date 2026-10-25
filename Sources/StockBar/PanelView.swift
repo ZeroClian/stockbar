@@ -11,7 +11,10 @@ struct PanelView: View {
     private var hasStatus: Bool { store.error != nil || store.message != nil }
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView(.vertical) {
+            // Legacy macOS scrollers add a 17pt gutter to fixed-width content,
+            // widening this view to 297pt and shifting it inside the 280pt popover.
+            // Keep the viewport width stable; wheel/trackpad scrolling still works.
+            ScrollView(.vertical, showsIndicators: false) {
                 content.frame(width: 280).fixedSize(horizontal: false, vertical: true)
                     .background(GeometryReader { proxy in
                         Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
@@ -48,6 +51,7 @@ struct PanelView: View {
                 StockEditor(store: store, item: item, initialAlerts: alerts).id(id + String(alerts))
             } else { HomeView(store: store) }
         case .settings: SettingsView(store: store)
+        case .sorting: WatchlistSortView(store: store)
         case .details:
             VStack(spacing: 0) {
                 PanelHeader(store: store, title: "详情", subtitle: "")
@@ -69,6 +73,21 @@ struct HomeView: View {
                 tab("自选", holdings: false)
                 tab("持仓", holdings: true)
                 Spacer(minLength: 0)
+                if !store.state.items.isEmpty {
+                    Menu {
+                        ForEach(store.state.items) { item in
+                            Button { store.pinStock(item.id) } label: {
+                                if store.state.pinnedSymbol == item.id { Label(store.displayName(item), systemImage: "checkmark") }
+                                else { Text(store.displayName(item)) }
+                            }
+                        }
+                    } label: { Image(systemName: "pin").font(.system(size: 11)) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width: 24)
+                    .help("快速切换状态栏关注股票").accessibilityLabel("切换状态栏关注股票")
+                    .disabled(!store.storageHealthy)
+                    IconButton(symbol: "arrow.up.arrow.down", label: "自选排序") { store.route = .sorting }
+                        .disabled(!store.storageHealthy)
+                }
                 IconButton(symbol: store.revealed ? "eye" : "eye.slash", label: store.revealed ? "隐藏名称和金额" : "显示名称和金额") { store.revealed.toggle() }
                 IconButton(symbol: "xmark", label: "立即收起") { store.closePanel() }
             }.padding(.horizontal, 8).frame(height: 36)
@@ -106,8 +125,8 @@ struct HomeView: View {
             }
             Divider()
             HStack(spacing: 0) {
-                Text(store.latestTime.map { UI.time($0, full: true) } ?? "等待行情")
-                    .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1)
+                Text(TradingSchedule.isOpen(store.now) ? (store.latestTime.map { UI.time($0) } ?? "等待行情") : store.marketLabel)
+                    .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1).help(store.refreshDescription)
                 Spacer(minLength: 0)
                 IconButton(symbol: "plus", label: "添加股票") { store.message = nil; store.route = .add }.disabled(!store.storageHealthy)
                 IconButton(symbol: store.hasUnreadAlerts ? "bell.badge" : "bell", label: store.hasUnreadAlerts ? "查看提醒" : "提醒设置", active: store.hasUnreadAlerts) {
@@ -142,6 +161,7 @@ struct StockRow: View {
             HStack(spacing: 6) {
                 HStack(spacing: 2) {
                     Text(store.displayName(item)).lineLimit(1)
+                    if store.state.pinnedSymbol == item.id { Image(systemName: "pin.fill").font(.system(size: 8)).foregroundColor(.secondary) }
                     if store.isOld(item.id) { Text("旧").font(.system(size: 9)).foregroundColor(.secondary) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 value(first: true).frame(width: 72, alignment: .trailing)
@@ -183,5 +203,27 @@ struct AlertInbox: View {
                 Button("全部已读") { store.acknowledgeAlerts(); store.route = .home }.disabled(!store.hasUnreadAlerts || !store.storageHealthy)
             }.font(.system(size: 11)).padding(12)
         }
+    }
+}
+
+struct WatchlistSortView: View {
+    @ObservedObject var store: AppStore
+    var body: some View {
+        VStack(spacing: 0) {
+            PanelHeader(store: store, title: "自选排序", subtitle: "")
+            Text("上下移动即保存，代号保持不变。")
+                .font(.system(size: 10)).foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+            ForEach(Array(store.state.items.enumerated()), id: \.element.id) { index, item in
+                HStack {
+                    Text(store.displayName(item)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    IconButton(symbol: "arrow.up", label: "上移 " + store.displayName(item)) { store.moveItem(item.id, offset: -1) }
+                        .disabled(index == 0 || !store.storageHealthy)
+                    IconButton(symbol: "arrow.down", label: "下移 " + store.displayName(item)) { store.moveItem(item.id, offset: 1) }
+                        .disabled(index == store.state.items.count - 1 || !store.storageHealthy)
+                }.font(.system(size: 12)).padding(.horizontal, 12).frame(height: 32)
+            }
+        }.padding(.bottom, 8)
     }
 }

@@ -322,3 +322,26 @@ private func record(_ raw: String = "sh600519", changes: [Int: String] = [:]) ->
     #expect(throws:(any Error).self) { try file.save(SavedState()) }
     #expect(try Data(contentsOf:url) == damaged)
 }
+
+@Test func oldSettingsDefaultToNoShortcutWithoutLosingHoldings() throws {
+    let original = SavedState(items: [WatchItem(symbol: try StockSymbol("300750"), name: "宁德时代", holding: Holding(quantity: 200, averageCost: 180))])
+    var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+    json.removeValue(forKey: "globalShortcut")
+    let decoded = try JSONDecoder().decode(SavedState.self, from: JSONSerialization.data(withJSONObject: json))
+    #expect(decoded.globalShortcut == nil)
+    #expect(decoded.items == original.items)
+}
+
+@Test func shortcutRoundTripAndInvalidCombinationsAreRejected() throws {
+    var state = SavedState()
+    state.globalShortcut = GlobalShortcut(keyCode: 49, modifiers: [.control, .option])
+    let file = StateFile(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("state.json"))
+    defer { try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent()) }
+    try file.save(state)
+    #expect(try file.load().globalShortcut == GlobalShortcut(keyCode: 49, modifiers: [.control, .option]))
+    for shortcut in [GlobalShortcut(keyCode: 49, modifiers: []), GlobalShortcut(keyCode: 0, modifiers: [.command]), GlobalShortcut(keyCode: 53, modifiers: [.control, .option]), GlobalShortcut(keyCode: 999, modifiers: [.control, .option]), GlobalShortcut(keyCode: 49, modifiers: .init(rawValue: 255))] {
+        state.globalShortcut = shortcut
+        #expect(throws: (any Error).self) { try file.save(state) }
+    }
+    #expect(try file.load().globalShortcut?.keyCode == 49)
+}

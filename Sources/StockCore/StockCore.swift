@@ -51,7 +51,7 @@ public struct Quote: Codable, Equatable, Sendable {
     public init(symbol: StockSymbol, name: String, last: Decimal, previousClose: Decimal, percent: Decimal, timestamp: Date) {
         self.symbol = symbol; self.name = name; self.last = last; self.previousClose = previousClose; self.percent = percent; self.timestamp = timestamp
     }
-    fileprivate var isValid: Bool {
+    public var isValid: Bool {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !last.isNaN, last > 0, !previousClose.isNaN, previousClose > 0,
               !percent.isNaN, !change.isNaN, timestamp.timeIntervalSinceReferenceDate.isFinite else { return false }
@@ -121,6 +121,8 @@ public struct WatchItem: Codable, Equatable, Identifiable, Sendable {
 public enum MenuMode: String, Codable, Sendable { case icon, stock, dailyProfit }
 
 public struct SavedState: Codable, Equatable, Sendable {
+    public var refreshIntervalSeconds: Int
+    public var globalShortcut: GlobalShortcut?
     public var schemaVersion: Int
     public var aliases: [String: String]
     public var nextAliasIndex: Int
@@ -131,17 +133,21 @@ public struct SavedState: Codable, Equatable, Sendable {
     public var compactRows: Bool
     /// Rule identity -> Shanghai calendar date. Committed atomically with silent unread alerts or after successful system submission.
     public var delivered: [String: String]
-    public init(items: [WatchItem] = [], pinnedSymbol: String? = nil, menuMode: MenuMode = .icon, compactRows: Bool = false, delivered: [String: String] = [:], schemaVersion: Int = 2, aliases: [String: String] = [:], nextAliasIndex: Int = 1, unreadAlerts: [PendingAlert] = []) {
+    public init(items: [WatchItem] = [], pinnedSymbol: String? = nil, menuMode: MenuMode = .icon, compactRows: Bool = false, delivered: [String: String] = [:], schemaVersion: Int = 2, aliases: [String: String] = [:], nextAliasIndex: Int = 1, unreadAlerts: [PendingAlert] = [], globalShortcut: GlobalShortcut? = nil, refreshIntervalSeconds: Int = 15) {
+        self.refreshIntervalSeconds = refreshIntervalSeconds
+        self.globalShortcut = globalShortcut
         self.schemaVersion = schemaVersion; self.aliases = aliases; self.nextAliasIndex = nextAliasIndex; self.unreadAlerts = unreadAlerts
         self.items = items; self.pinnedSymbol = pinnedSymbol; self.menuMode = menuMode; self.compactRows = compactRows; self.delivered = delivered
         assignMissingAliases()
     }
-    private enum CodingKeys: String, CodingKey { case schemaVersion, items, pinnedSymbol, menuMode, compactRows, delivered, aliases, nextAliasIndex, unreadAlerts }
+    private enum CodingKeys: String, CodingKey { case refreshIntervalSeconds, globalShortcut, schemaVersion, items, pinnedSymbol, menuMode, compactRows, delivered, aliases, nextAliasIndex, unreadAlerts }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let version = c.contains(.schemaVersion) ? try c.decode(Int.self, forKey: .schemaVersion) : 1
         guard version == 1 || version == 2 else { throw StockCoreError.invalidValue("保存的数据版本不受支持") }
         schemaVersion = 2
+        refreshIntervalSeconds = c.contains(.refreshIntervalSeconds) ? try c.decode(Int.self, forKey: .refreshIntervalSeconds) : 15
+        globalShortcut = try c.decodeIfPresent(GlobalShortcut.self, forKey: .globalShortcut)
         items = try c.decode([WatchItem].self, forKey: .items)
         pinnedSymbol = try c.decodeIfPresent(String.self, forKey: .pinnedSymbol)
         let savedMode = try c.decode(MenuMode.self, forKey: .menuMode)
@@ -168,6 +174,8 @@ public struct SavedState: Codable, Equatable, Sendable {
         while nextAliasIndex < Int.max && used.contains(String(format: "A%02lld", nextAliasIndex)) { nextAliasIndex += 1 }
     }
     public func validate() throws {
+        guard (5...300).contains(refreshIntervalSeconds) else { throw StockCoreError.invalidValue("刷新间隔必须是 5–300 秒的整数") }
+        try globalShortcut?.validate()
         guard schemaVersion == 2, nextAliasIndex > 0, nextAliasIndex < Int.max else { throw StockCoreError.invalidValue("保存的数据版本或代号序号无效") }
         var usedAliases = Set<String>()
         for (symbol, alias) in aliases {
@@ -267,7 +275,7 @@ public enum MarketClock {
         return calendar
     }
     public static func isTradingTime(_ date: Date) -> Bool {
-        guard date.timeIntervalSinceReferenceDate.isFinite else { return false }
+        guard TradingSchedule.isTradingDay(date) else { return false }
         let c = calendar.dateComponents([.weekday, .hour, .minute, .second, .nanosecond], from: date)
         guard let weekday = c.weekday, (2...6).contains(weekday), let h = c.hour, let m = c.minute, let s = c.second else { return false }
         let seconds = h * 3600 + m * 60 + s

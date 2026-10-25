@@ -206,13 +206,15 @@ struct SettingsView: View {
                 }.disabled(!store.storageHealthy)
                 Text("名称默认代号，金额默认隐藏。\n收起后恢复隐藏；按 Esc 可立即收起。")
                     .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                ShortcutSettingsView(store: store)
+                RefreshSettingsView(store: store, expanded: expansion(.refresh))
                 HStack {
                     Button("测试小点") { store.previewDot = true; store.message = "静默测试：状态栏已亮小点，没有发送系统通知。" }
                     Button("查看提醒") { store.route = .inbox }
                     Spacer(minLength: 0)
                 }
                 Divider()
-                DisclosureGroup("系统通知 · " + permissionText) {
+                DisclosureGroup("系统通知 · " + permissionText, isExpanded: expansion(.notifications)) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text("仅对主动选择系统通知的股票发送。专注模式可能影响横幅。")
                             .fixedSize(horizontal: false, vertical: true)
@@ -222,15 +224,16 @@ struct SettingsView: View {
                         }
                     }.font(.system(size: 10)).padding(.top, 6)
                 }
-                DisclosureGroup("数据与说明") {
+                UpdateSettingsView(checker: store.updateChecker, expanded: expansion(.updates))
+                DisclosureGroup("数据与说明", isExpanded: expansion(.data)) {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text("每 15 秒刷新；休眠或退出后停止监测。持仓仅保存在本机，行情可能延迟，以券商数据为准。")
+                        Text("收起面板不影响交易时段内的提醒监测；休眠或退出后停止监测。持仓与行情缓存仅保存在本机，行情可能延迟，以券商数据为准。")
                             .fixedSize(horizontal: false, vertical: true)
                         Button("查看数据文件") { store.revealData() }
                     }.font(.system(size: 10)).padding(.top, 6)
                 }
                 HStack {
-                    Button("刷新") { Task { await store.refresh() } }.disabled(store.isRefreshing)
+                    Button("刷新") { Task { await store.refresh() } }.disabled(store.isRefreshing || !TradingSchedule.isOpen(store.now))
                     Spacer()
                     Button("退出") { NSApp.terminate(nil) }
                 }
@@ -243,5 +246,40 @@ struct SettingsView: View {
         case .denied: return "未允许"
         default: return "未申请"
         }
+    }
+    private func expansion(_ section: SettingsSection) -> Binding<Bool> {
+        Binding(get: { store.expandedSettings.contains(section) }, set: { expanded in
+            if expanded { store.expandedSettings.insert(section) }
+            else { store.expandedSettings.remove(section) }
+        })
+    }
+}
+
+struct RefreshSettingsView: View {
+    @ObservedObject var store: AppStore
+    @ViewState private var interval = ""
+    @Binding private var isExpanded: Bool
+    init(store: AppStore, expanded: Binding<Bool>) {
+        self.store = store
+        _isExpanded = expanded
+    }
+    var body: some View {
+        DisclosureGroup("刷新 · \(store.state.refreshIntervalSeconds) 秒", isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 6) {
+                    TextField("5–300", text: $interval).frame(width: 58)
+                        .textFieldStyle(.roundedBorder).accessibilityLabel("刷新间隔秒数")
+                        .onSubmit { _ = store.saveRefreshInterval(interval) }
+                    Text("秒")
+                    Spacer(minLength: 0)
+                    Button("保存") { _ = store.saveRefreshInterval(interval) }
+                        .disabled(!store.storageHealthy)
+                }
+                Text(store.refreshDescription)
+                Text("5–300 秒；间隔越长，提醒可能越晚。午休、周末和节假日不刷新；添加股票时仍会查询验证代码。")
+                Text("内置 2026 年交易日历，超出范围会暂停并提示更新。")
+            }.font(.system(size: 10)).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true).padding(.top, 6)
+        }.onAppear { interval = String(store.state.refreshIntervalSeconds) }
     }
 }

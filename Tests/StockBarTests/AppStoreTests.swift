@@ -146,6 +146,9 @@ private struct Fixture {
     let now = ISO8601DateFormatter().date(from: times.0)!
     let timestamp = ISO8601DateFormatter().date(from: times.1)!
     let notifications = NotificationsStub()
+    if !TradingSchedule.isOpen(now) {
+        try JSONEncoder().encode(fixture.quotes(at: timestamp)).write(to: fixture.directory.appendingPathComponent("quotes-cache.json"))
+    }
     let store = fixture.store(QuotesStub(.success(try fixture.quotes(at: timestamp))), notifications, now: now)
     await store.refresh()
     #expect(store.quotes["sh600519"]?.timestamp == timestamp)
@@ -256,6 +259,8 @@ private actor PausedQuoteProvider: QuoteProviding {
     let now = ISO8601DateFormatter().date(from: input.0)!
     let timestamp = ISO8601DateFormatter().date(from: input.1)!
     let notifications = NotificationsStub()
+    // Rest-time startup displays local cache without requesting quotes.
+    try JSONEncoder().encode(fixture.quotes(at: timestamp)).write(to: fixture.directory.appendingPathComponent("quotes-cache.json"))
     let store = fixture.store(QuotesStub(.success(try fixture.quotes(at: timestamp))), notifications, now: now)
     await store.refresh()
     #expect(store.quotes["sh600519"]?.timestamp == timestamp)

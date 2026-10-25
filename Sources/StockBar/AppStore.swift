@@ -5,8 +5,10 @@ import UserNotifications
 import StockCore
 
 enum PanelRoute: Equatable {
-    case home, add, edit(String, Bool), settings, details, inbox
+    case home, add, edit(String, Bool), settings, details, inbox, sorting
 }
+
+enum SettingsSection: Hashable { case refresh, notifications, updates, data }
 
 /// Display-only policy. Alert eligibility remains governed by MarketClock.isFresh.
 enum QuoteDisplayPolicy {
@@ -16,7 +18,7 @@ enum QuoteDisplayPolicy {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
         let components = calendar.dateComponents([.weekday, .hour, .minute], from: now)
-        guard let weekday = components.weekday, (2...6).contains(weekday),
+        guard TradingSchedule.isTradingDay(now), let weekday = components.weekday, (2...6).contains(weekday),
               let hour = components.hour, let minute = components.minute else { return true }
         let minutes = hour * 60 + minute
         let close: Date?
@@ -42,8 +44,14 @@ final class AppStore: ObservableObject {
     @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
     @Published private(set) var now: Date
     @Published var route: PanelRoute = .home {
-        didSet { if oldValue != route { navigationRevision &+= 1 } }
+        didSet { if oldValue != route { navigationRevision &+= 1; isRecordingShortcut = false } }
     }
+    @Published var isRecordingShortcut = false
+    @Published var expandedSettings: Set<SettingsSection> = []
+    @Published private(set) var shortcutError: String?
+    let updateChecker: UpdateChecker
+    let shortcutManager: GlobalShortcutManager
+    var onShortcutToggle: (() -> Void)?
     @Published var showHoldings = false
     @Published var revealed = false
     @Published var panelHeightLimit: CGFloat = 420
@@ -56,13 +64,18 @@ final class AppStore: ObservableObject {
     private let service: any QuoteProviding
     private let notifications: any NotificationSending
     private let clock: () -> Date
-    private var timer: Timer?
+    private let scheduler: any RefreshScheduling
+    private var started = false
+    private var cacheURL: URL { dataURL.deletingLastPathComponent().appendingPathComponent("quotes-cache.json") }
     private var wakeObserver: NSObjectProtocol?
     private var processingAlerts = false
     private var navigationRevision = 0
 
     init(dataDirectory: URL? = nil, service: any QuoteProviding = QuoteService(),
-         notifications: (any NotificationSending)? = nil, clock: @escaping () -> Date = Date.init) {
+         notifications: (any NotificationSending)? = nil, shortcutBackend: (any ShortcutRegistering)? = nil, scheduler: (any RefreshScheduling)? = nil, updateChecker: UpdateChecker? = nil, clock: @escaping () -> Date = Date.init) {
+        self.updateChecker = updateChecker ?? UpdateChecker()
+        self.shortcutManager = GlobalShortcutManager(backend: shortcutBackend ?? CarbonShortcutBackend())
+        self.scheduler = scheduler ?? RefreshScheduler()
         self.service = service
         self.notifications = notifications ?? NotificationService()
         self.clock = clock
@@ -73,28 +86,75 @@ final class AppStore: ObservableObject {
         file = StateFile(url: dataURL)
         do { state = try file.load() }
         catch { storageHealthy = false; self.error = "本地数据无法读取，已停止保存与提醒以保护持仓。\(error.localizedDescription)" }
+        if let data = try? Data(contentsOf: cacheURL), let cached = try? JSONDecoder().decode([String: Quote].self, from: data) {
+            let ids = Set(state.items.map(\.id))
+            quotes = cached.filter { ids.contains($0.key) && $0.value.isValid && $0.key == $0.value.symbol.rawValue }
+        }
+        shortcutManager.onActivate = { [weak self] in
+            guard let self else { return }
+            if self.isRecordingShortcut { self.isRecordingShortcut = false; self.shortcutError = nil }
+            else { self.onShortcutToggle?() }
+        }
     }
 
     func start() {
-        guard timer == nil else { return }
-        Task { await updatePermission(); await refresh() }
-        timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refresh() }
-        }
+        guard !started else { return }
+        started = true
+        restoreGlobalShortcut()
+        Task { await updatePermission() }
+        // Scheduling belongs to the app, so no panel/route/visibility checks appear here.
+        scheduler.schedule(after: 0) { [weak self] in await self?.refresh() }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification,
             object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in await self?.refresh() }
             }
     }
 
+    func stop() {
+        started = false
+        scheduler.cancel()
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        wakeObserver = nil
+        shortcutManager.stop()
+    }
+
+    func synchronizeClock() { now = clock() }
+
+    private func scheduleNextRefresh() {
+        guard started else { return }
+        scheduler.cancel()
+        now = clock()
+        guard !state.items.isEmpty else { return }
+        // A daily local wake keeps an expired-calendar warning accurate without network polling.
+        let next = TradingSchedule.nextWake(after: now, interval: state.refreshIntervalSeconds)
+            ?? now.addingTimeInterval(24 * 60 * 60)
+        scheduler.schedule(after: max(0.01, next.timeIntervalSince(now))) { [weak self] in
+            guard let self, self.started else { return }
+            await self.refresh()
+        }
+    }
+
+    private func saveQuoteCache() {
+        guard let data = try? JSONEncoder().encode(quotes) else { return }
+        try? FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: cacheURL, options: .atomic)
+    }
+
     var holdings: [WatchItem] { state.items.filter { $0.holding.quantity > 0 } }
     var summary: PortfolioSummary { PortfolioSummary(items: state.items, quotes: quotes) }
     var hasOldHoldings: Bool { holdings.contains { isOld($0.id) } }
-    var marketLabel: String { MarketClock.isTradingTime(now) ? "交易时段" : "休市" }
+    var marketLabel: String {
+        guard TradingSchedule.isCalendarSupported(now) else { return "日历需更新" }
+        return TradingSchedule.isOpen(now) ? "交易时段" : "休市"
+    }
+    var refreshDescription: String {
+        guard TradingSchedule.isCalendarSupported(now) else { return "交易日历未覆盖当前年份，监测已暂停，请检查新版。" }
+        return TradingSchedule.isOpen(now) ? "每 \(state.refreshIntervalSeconds) 秒监测，收起面板后继续。" : "休市暂停刷新，开市自动恢复监测。"
+    }
     var latestTime: Date? { state.items.compactMap { quotes[$0.id]?.timestamp }.min() }
     var hasUnreadAlerts: Bool { previewDot || !state.unreadAlerts.isEmpty }
     func displayName(_ item: WatchItem) -> String { revealed ? item.name : (state.aliases[item.id] ?? "—") }
-    func resetPrivacy() { revealed = false; route = .home; message = nil }
+    func resetPrivacy() { isRecordingShortcut = false; expandedSettings = []; revealed = false; route = .home; message = nil }
     func closePanel() { resetPrivacy(); NotificationCenter.default.post(name: .closeStockPanel, object: nil) }
     func acknowledgeAlerts() {
         var next = state
@@ -126,6 +186,8 @@ final class AppStore: ObservableObject {
     func refresh() async {
         guard !isRefreshing else { return }
         now = clock()
+        defer { scheduleNextRefresh() }
+        guard TradingSchedule.isOpen(now) else { return }
         let requested = state.items.map(\.symbol)
         guard !requested.isEmpty else { return }
         isRefreshing = true
@@ -146,6 +208,7 @@ final class AppStore: ObservableObject {
             if !ids.isEmpty && accepted.isEmpty { error = "未取得有效新行情，请检查网络或证券代码；旧行情不会触发提醒。" }
             else if !failedSymbols.isEmpty { error = "部分股票更新失败，已标记旧行情。" }
             else if storageHealthy { error = nil }
+            saveQuoteCache()
             await processAlerts(accepted)
         } catch {
             failedSymbols.formUnion(requested.map(\.rawValue))
@@ -175,6 +238,8 @@ final class AppStore: ObservableObject {
             quotes[symbol.rawValue] = quote
             failedSymbols.remove(symbol.rawValue)
             now = clock()
+            saveQuoteCache()
+            scheduleNextRefresh()
             message = "已添加 \(state.aliases[symbol.rawValue] ?? "自选项")"
             return true
         } catch is CancellationError { return false }
@@ -236,6 +301,26 @@ final class AppStore: ObservableObject {
         return true
     }
 
+    func restoreGlobalShortcut() {
+        guard storageHealthy else { return }
+        do {
+            try shortcutManager.replace(state.globalShortcut) { _ in true }
+            shortcutError = nil
+        } catch { shortcutError = "已保存的快捷键当前不可用，请清除或重新设置。" }
+    }
+
+    @discardableResult func setGlobalShortcut(_ shortcut: GlobalShortcut?) -> Bool {
+        do {
+            let saved = try shortcutManager.replace(shortcut) { value in
+                var next = state
+                next.globalShortcut = value
+                return commit(next)
+            }
+            if saved { shortcutError = nil; isRecordingShortcut = false }
+            return saved
+        } catch { shortcutError = error.localizedDescription; return false }
+    }
+
     func remove(_ id: String) {
         var next = state
         next.items.removeAll { $0.id == id }
@@ -245,7 +330,38 @@ final class AppStore: ObservableObject {
         // Keep today's receipt keys so removing/re-adding a stock cannot bypass deduplication.
         guard commit(next) else { return }
         quotes.removeValue(forKey: id); failedSymbols.remove(id)
+        saveQuoteCache()
+        scheduleNextRefresh()
         route = .home; message = "已移出自选"
+    }
+
+    @discardableResult func saveRefreshInterval(_ input: String) -> Bool {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil,
+              let interval = Int(trimmed), (5...300).contains(interval) else {
+            error = "刷新间隔需为 5–300 秒的整数。"; return false
+        }
+        var next = state
+        next.refreshIntervalSeconds = interval
+        guard commit(next) else { return false }
+        scheduleNextRefresh()
+        return true
+    }
+
+    func moveItem(_ id: String, offset: Int) {
+        guard [-1, 1].contains(offset), let index = state.items.firstIndex(where: { $0.id == id }),
+              state.items.indices.contains(index + offset) else { return }
+        var next = state
+        next.items.swapAt(index, index + offset)
+        _ = commit(next)
+    }
+
+    func pinStock(_ id: String) {
+        guard state.items.contains(where: { $0.id == id }) else { return }
+        var next = state
+        next.pinnedSymbol = id
+        // Selecting a stock must not silently turn off icon-only privacy mode.
+        _ = commit(next)
     }
 
     func saveSettings(mode: MenuMode? = nil, compact: Bool? = nil) {
@@ -311,7 +427,7 @@ final class AppStore: ObservableObject {
             }
             guard !Task.isCancelled, revision == navigationRevision else { return }
             guard notificationStatus == .authorized || notificationStatus == .provisional else {
-                error = "通知权限未开启。请在系统设置 → 通知 → 自选股中允许通知。"; return
+                error = "通知权限未开启。请在系统设置 → 通知 → Tickfin 中允许通知。"; return
             }
             try await notifications.send(identifier: "manual-test", title: "测试提醒", body: "这是手动测试，不代表达到提醒条件。")
             guard !Task.isCancelled, revision == navigationRevision else { return }

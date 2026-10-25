@@ -24,10 +24,10 @@ jobs:
       - name: Upload installation artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: StockBar-${{ runner.arch }}
+          name: Tickfin-${{ runner.arch }}
           path: |
-            dist/StockBar-*.dmg
-            dist/StockBar-*.zip
+            dist/Tickfin-*.dmg
+            dist/Tickfin-*.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 7

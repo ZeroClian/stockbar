@@ -8,7 +8,7 @@ case "${1:-}" in
     *) printf '%s\n' 'Usage: bash scripts/package-release.sh [--skip-build]' >&2; exit 2 ;;
 esac
 
-app_path="$project_root/dist/自选股.app"
+app_path="$project_root/dist/Tickfin.app"
 codesign --verify --strict "$app_path"
 version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app_path/Contents/Info.plist")"
 architecture="$(lipo -archs "$app_path/Contents/MacOS/StockBar")"
@@ -20,17 +20,17 @@ case "$architecture" in
     arm64|x86_64) ;;
     *) printf '%s\n' 'Expected one supported architecture; do not mislabel a universal build.' >&2; exit 1 ;;
 esac
-stem="StockBar-$version-$architecture"
+stem="Tickfin-$version-$architecture"
 mkdir -p .build dist
 stage="$(mktemp -d "$project_root/.build/release-stage.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
-ditto "$app_path" "$stage/自选股.app"
+ditto "$app_path" "$stage/Tickfin.app"
 ln -s /Applications "$stage/Applications"
 cp LICENSE "$stage/LICENSE.txt"
 cp docs/INSTALL.md "$stage/安装说明.md"
 
 ditto -c -k --sequesterRsrc --keepParent "$app_path" "dist/$stem.zip"
-hdiutil create -volname "StockBar $version" -srcfolder "$stage" -format UDZO -ov "dist/$stem.dmg"
+hdiutil create -volname "Tickfin $version" -srcfolder "$stage" -format UDZO -ov "dist/$stem.dmg"
 hdiutil verify "dist/$stem.dmg"
 unzip -tq "dist/$stem.zip"
 (
