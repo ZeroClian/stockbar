@@ -8,7 +8,7 @@ enum QuoteServiceError: LocalizedError {
         switch self {
         case .response(let code): return "行情服务返回 HTTP \(code)，请稍后重试。"
         case .encoding: return "行情内容无法解码。"
-        case .empty: return "没有取得有效 A 股行情，请检查证券代码。"
+        case .empty: return "没有取得有效 A 股或 ETF 行情，请检查交易代码。"
         }
     }
 }
@@ -20,7 +20,7 @@ protocol QuoteProviding {
 struct QuoteService: QuoteProviding {
     func fetch(_ symbols: [StockSymbol]) async throws -> [String: Quote] {
         guard !symbols.isEmpty else { return [:] }
-        // Symbol validation keeps the request restricted to stock identifiers.
+        // Symbol validation keeps requests restricted to supported security identifiers.
         let ids = Array(Set(symbols.map(\.rawValue))).sorted()
         var all: [String: Quote] = [:]
         for start in stride(from: 0, to: ids.count, by: 50) {

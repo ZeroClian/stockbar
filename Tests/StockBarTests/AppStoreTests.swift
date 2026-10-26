@@ -8,11 +8,80 @@ private let tradingNow = ISO8601DateFormatter().date(from: "2026-10-23T02:00:00Z
 private let receipt = ["sh600519|up|3": "2026-10-23"]
 private enum BoundaryFailure: Error { case unavailable }
 
+@MainActor @Test func etfCanBeAddedPinnedHeldAndMonitoredAfterClosingPanel() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("tickfin-etf-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let q = Quote(symbol: try StockSymbol("159915"), name: "创业板ETF", last: Decimal(string: "2.651")!,
+                  previousClose: Decimal(string: "2.702")!, percent: Decimal(string: "-1.89")!, timestamp: tradingNow)
+    let store = AppStore(dataDirectory: directory, service: QuotesStub(.success(["sz159915": q])),
+                         notifications: NotificationsStub(), clock: { tradingNow })
+    #expect(await store.add("159915"))
+    #expect(store.saveHolding(id: "sz159915", quantity: "1000", cost: "2.5", pin: true))
+    #expect(await store.saveRule(id: "sz159915", upEnabled: false, downEnabled: true, up: "3", down: "1", delivery: .silent))
+    store.closePanel()
+    await store.refresh()
+    #expect(store.summary.daily == -51)
+    #expect(store.summary.floating == 151)
+    #expect(store.state.pinnedSymbol == "sz159915")
+    #expect(store.state.unreadAlerts.count == 1)
+    await store.refresh()
+    #expect(store.state.unreadAlerts.count == 1)
+    let persisted = try StateFile(url: store.dataURL).load()
+    #expect(persisted.items.first?.holding.quantity == 1000)
+    #expect(persisted.delivered["sz159915|down|1"] == "2026-10-23")
+    let restored = AppStore(dataDirectory: directory, service: QuotesStub(.success([:])),
+                            notifications: NotificationsStub(), clock: { tradingNow })
+    #expect(restored.state == persisted)
+    #expect(restored.quotes["sz159915"]?.last == Decimal(string: "2.651"))
+}
+
 private actor QuotesStub: QuoteProviding {
     var result: Result<[String: Quote], BoundaryFailure>
     init(_ result: Result<[String: Quote], BoundaryFailure>) { self.result = result }
     func set(_ result: Result<[String: Quote], BoundaryFailure>) { self.result = result }
     func fetch(_ symbols: [StockSymbol]) async throws -> [String: Quote] { try result.get() }
+}
+
+@MainActor @Test(arguments: [AlertDelivery.silent, .system])
+func priceAndProfitRulesSaveMonitorClosedAndDeduplicateAfterReload(delivery: AlertDelivery) async throws {
+    let fixture = try Fixture(alerts: false); defer { fixture.remove() }
+    let notifications = NotificationsStub()
+    notifications.permission = .notDetermined
+    let store = fixture.store(QuotesStub(.success(try fixture.quotes())), notifications)
+    var price = PriceAlertRule(); price.aboveEnabled = true; price.above = 103
+    var holding = HoldingAlertRule(); holding.profitEnabled = true; holding.profit = 400
+    #expect(await store.saveRule(id: "sh600519", upEnabled: false, downEnabled: false, up: "3", down: "2", delivery: delivery, price: price, holding: holding))
+    #expect(notifications.permissionRequests == (delivery == .system ? 1 : 0))
+    store.closePanel()
+    await store.refresh()
+    let keys: Set<String> = ["sh600519|priceAbove|103", "sh600519|profitAmount|400"]
+    #expect(Set(store.state.delivered.keys) == keys)
+    if delivery == .silent {
+        #expect(store.state.unreadAlerts.map(\.value) == [103, 400])
+        #expect(store.state.unreadAlerts.map(\.kind) == [.priceAbove, .profitAmount])
+    } else { #expect(notifications.submitted.count == 2) }
+    let persisted = try fixture.file.load()
+    #expect(persisted.items[0].rule.price == price && persisted.items[0].rule.holding == holding)
+    let restored = fixture.store(QuotesStub(.success(try fixture.quotes())), notifications)
+    await restored.refresh()
+    #expect(restored.state.delivered == persisted.delivered)
+    #expect(delivery == .silent ? restored.state.unreadAlerts.count == 2 : notifications.submitted.count == 2)
+}
+
+@MainActor @Test func clearedPositionStopsProfitRuleAndInvalidRulesPreserveData() async throws {
+    let fixture = try Fixture(alerts: false, delivery: .silent); defer { fixture.remove() }
+    let store = fixture.store(QuotesStub(.success(try fixture.quotes())), NotificationsStub())
+    var price = PriceAlertRule(); price.aboveEnabled = true; price.above = 103
+    var holding = HoldingAlertRule(); holding.profitEnabled = true; holding.profit = 400
+    #expect(await store.saveRule(id: "sh600519", upEnabled: false, downEnabled: false, up: "3", down: "2", price: price, holding: holding))
+    let before = store.state
+    var invalid = holding; invalid.profit = .nan
+    #expect(!((await store.saveRule(id: "sh600519", upEnabled: false, downEnabled: false, up: "3", down: "2", holding: invalid))))
+    #expect(store.state == before && store.storageHealthy)
+    #expect(store.clearHolding("sh600519"))
+    store.closePanel(); await store.refresh()
+    #expect(store.state.unreadAlerts.map(\.kind) == [.priceAbove])
+    #expect(store.state.items[0].rule.holding.profitEnabled)
 }
 
 @MainActor private final class NotificationsStub: NotificationSending {
@@ -381,7 +450,7 @@ private actor PausedQuoteProvider: QuoteProviding {
     let store = fixture.store(QuotesStub(.success(try fixture.quotes())), NotificationsStub())
     await store.refresh()
     let item = store.state.items[0]
-    #expect(store.displayName(item) == "A01")
+    #expect(store.displayName(item) == "GZMT")
     #expect(store.menuTitle == "+3.00%")
     store.revealed = true
     #expect(store.displayName(item) == "贵州茅台")
@@ -389,7 +458,7 @@ private actor PausedQuoteProvider: QuoteProviding {
     store.message = "saved"
     store.resetPrivacy()
     #expect(!store.revealed && store.route == .home && store.message == nil)
-    #expect(store.displayName(item) == "A01")
+    #expect(store.displayName(item) == "GZMT")
     store.saveSettings(mode: .icon)
     #expect(store.menuTitle.isEmpty)
     store.saveSettings(mode: .dailyProfit)
@@ -462,4 +531,32 @@ private actor PausedQuoteProvider: QuoteProviding {
     #expect(!store.saveHolding(id: "sh600519", quantity: "1", cost: "99", pin: true, alias: "\u{0000}"))
     #expect(store.storageHealthy)
     #expect(try fixture.file.load() == fixture.initial)
+}
+
+@MainActor @Test func clearSingleHoldingPreservesEverythingElseAndPersists() throws {
+    let fixture = try Fixture(twoHoldings: true); defer { fixture.remove() }
+    var initial = fixture.initial
+    initial.delivered = receipt
+    initial.unreadAlerts = [PendingAlert(key: "sh600519|up|3", day: "2026-10-23", symbol: try StockSymbol("600519"), percent: 3)]
+    try fixture.file.save(initial)
+    let store = fixture.store(QuotesStub(.success([:])), NotificationsStub())
+    var expected = initial
+    expected.items[0].holding = Holding()
+    #expect(store.clearHolding("sh600519"))
+    #expect(store.state == expected)
+    #expect(try fixture.file.load() == expected)
+    #expect(store.clearHolding("sh600519"))
+    #expect(store.state == expected)
+    #expect(!store.clearHolding("sz300750"))
+    #expect(try fixture.file.load() == expected)
+}
+
+@MainActor @Test func failedHoldingClearPreservesMemoryAndDamagedFile() throws {
+    let fixture = try Fixture(twoHoldings: true); defer { fixture.remove() }
+    let store = fixture.store(QuotesStub(.success([:])), NotificationsStub())
+    let broken = Data("broken data must remain recoverable".utf8)
+    try broken.write(to: store.dataURL)
+    #expect(!store.clearHolding("sh600519"))
+    #expect(store.state == fixture.initial)
+    #expect(try Data(contentsOf: store.dataURL) == broken)
 }

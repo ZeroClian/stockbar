@@ -58,7 +58,8 @@ extension GlobalShortcut {
         if event.modifierFlags.contains(.option) { flags.insert(.option) }
         if event.modifierFlags.contains(.shift) { flags.insert(.shift) }
         if event.modifierFlags.contains(.command) { flags.insert(.command) }
-        if event.modifierFlags.contains(.function) { flags.insert(.init(rawValue: 16)) }
+        // Arrow events carry the Function flag even without the physical Fn key.
+        if event.modifierFlags.contains(.function), ![123, 124].contains(event.keyCode) { flags.insert(.init(rawValue: 16)) }
         self.init(keyCode: UInt32(event.keyCode), modifiers: flags)
     }
 }

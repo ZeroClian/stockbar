@@ -1,5 +1,16 @@
 import Foundation
 
+public enum ShortcutAction: CaseIterable, Sendable {
+    case togglePanel, previousStock, nextStock
+    public var title: String {
+        switch self {
+        case .togglePanel: return "打开／收起"
+        case .previousStock: return "上一只"
+        case .nextStock: return "下一只"
+        }
+    }
+}
+
 public struct ShortcutModifiers: OptionSet, Codable, Equatable, Sendable {
     public let rawValue: UInt32
     public init(rawValue: UInt32) { self.rawValue = rawValue }
@@ -20,13 +31,13 @@ public struct GlobalShortcut: Codable, Equatable, Sendable {
         0:"A", 1:"S", 2:"D", 3:"F", 4:"H", 5:"G", 6:"Z", 7:"X", 8:"C", 9:"V",
         11:"B", 12:"Q", 13:"W", 14:"E", 15:"R", 16:"Y", 17:"T", 18:"1", 19:"2",
         20:"3", 21:"4", 22:"6", 23:"5", 25:"9", 26:"7", 28:"8", 29:"0",
-        31:"O", 32:"U", 34:"I", 35:"P", 37:"L", 38:"J", 40:"K", 45:"N", 46:"M", 49:"空格"
+        31:"O", 32:"U", 34:"I", 35:"P", 37:"L", 38:"J", 40:"K", 45:"N", 46:"M", 49:"空格", 123:"←", 124:"→"
     ]
     public func validate() throws {
         guard Self.keyNames[keyCode] != nil, modifiers.rawValue & ~UInt32(15) == 0,
               modifiers.rawValue.nonzeroBitCount >= 2,
               !modifiers.intersection([.control, .command]).isEmpty else {
-            throw StockCoreError.invalidValue("请用至少两个修饰键（包含 ⌃ 或 ⌘），加字母、数字或空格。")
+            throw StockCoreError.invalidValue("请用至少两个修饰键（包含 ⌃ 或 ⌘），加字母、数字、空格或左右方向键。")
         }
     }
     public var displayName: String {

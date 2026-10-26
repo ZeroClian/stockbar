@@ -19,11 +19,11 @@ private func record(_ raw: String = "sh600519", changes: [Int: String] = [:]) ->
     return "v_\(raw)=\"\(f.joined(separator: "~"))\";"
 }
 
-@Test func normalizesOnlyOrdinaryAShares() throws {
+@Test func normalizesASharesAndRejectsUnsupportedCodes() throws {
     for (input, want) in [(" 600519 ", "sh600519"), ("SZ000001", "sz000001"), ("920002", "bj920002"), ("430047", "bj430047"), ("301001", "sz301001"), ("689009", "sh689009")] {
         #expect(try StockSymbol(input).rawValue == want)
     }
-    for input in ["sh000001", "sz600519", "bj000001", "sh000300", "510300", "159915", "00700", "600519;sz000001", "123456", "９２０００２"] {
+    for input in ["sh000001", "sz600519", "bj000001", "sh000300", "00700", "600519;sz000001", "123456", "９２０００２"] {
         #expect(throws: (any Error).self) { try StockSymbol(input) }
     }
 }
@@ -65,25 +65,63 @@ private func record(_ raw: String = "sh600519", changes: [Int: String] = [:]) ->
     #expect(parsed["bj920002"]?.name == "万达轴承")
 }
 
+@Test func persistsParsedDailyHighAndLow() throws {
+    let parsed = try #require(QuoteParser.parse(record(changes: [33: "1750.25", 34: "1720.50"]))["sh600519"])
+    let data = try JSONEncoder().encode(parsed)
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect((object["dayHigh"] as? NSNumber)?.stringValue == "1750.25")
+    #expect((object["dayLow"] as? NSNumber)?.stringValue == "1720.5")
+    #expect(try JSONDecoder().decode(Quote.self, from: data) == parsed)
+}
+
+@Test func missingOrInvalidExtremesDoNotDiscardCurrentPrice() throws {
+    for value in ["", "0", "-1", "NaN", "Infinity", "bad"] {
+        let parsed = try #require(QuoteParser.parse(record(changes: [33: value, 34: value]))["sh600519"])
+        #expect(parsed.last == 1745)
+        #expect(parsed.dayHigh == nil)
+        #expect(parsed.dayLow == nil)
+    }
+    let reversed = try #require(QuoteParser.parse(record(changes: [33: "1700", 34: "1800"]))["sh600519"])
+    #expect(reversed.dayHigh == nil && reversed.dayLow == nil)
+    let partial = try #require(QuoteParser.parse(record(changes: [33: "1800", 34: "0"]))["sh600519"])
+    #expect(partial.dayHigh == 1800 && partial.dayLow == nil)
+    let flat = try #require(QuoteParser.parse(record(changes: [33: "1745", 34: "1745"]))["sh600519"])
+    #expect(flat.dayHigh == flat.last && flat.dayLow == flat.last)
+}
+
+@Test func legacyQuoteCacheWithoutExtremesRemainsUsable() throws {
+    let original = try quote()
+    var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+    object.removeValue(forKey: "dayHigh"); object.removeValue(forKey: "dayLow")
+    let restored = try JSONDecoder().decode(Quote.self, from: JSONSerialization.data(withJSONObject: object))
+    #expect(restored.isValid && restored.last == 1745)
+    #expect(restored.dayHigh == nil && restored.dayLow == nil)
+    var invalid = restored
+    invalid.dayHigh = 1700
+    #expect(!invalid.isValid)
+    invalid.dayHigh = 1800; invalid.dayLow = 1800
+    #expect(!invalid.isValid)
+}
+
 @Test func rejectsMalformedOrNonStockTencentRows() {
     for changes: [Int:String] in [[0:"51"], [2:"600000"], [3:"NaN"], [3:"Infinity"], [3:"1x"], [3:"-1"], [4:"0"], [32:"NaN"], [31:"bad"], [30:"20260230100000"], [30:"20261023250000"], [61:"ZS"], [61:"ETF"], [1:""]] {
         #expect(QuoteParser.parse(record(changes: changes)).isEmpty)
     }
     #expect(QuoteParser.parse(record("sz000001", changes: [0:"51",2:"000001",61:"ZS"])).isEmpty)
-    #expect(QuoteParser.parse(record("sh510300", changes: [2:"510300",61:"ETF"])).isEmpty)
+    #expect(QuoteParser.parse(record("sh510300", changes: [2:"510300",61:"LOF"])).isEmpty)
 }
 
 @Test func parsesCapturedChiNextAndStarMarketQuotes() throws {
     let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let text = try String(contentsOf: root.appendingPathComponent("docs/fixtures/quotes-20261024-boards.txt"), encoding: .utf8)
     let parsed = QuoteParser.parse(text)
-    let expected = ["sz300750":"宁德时代", "sz300059":"东方财富", "sz301269":"华大九天", "sz301236":"软通动力", "sh688981":"中芯国际", "sh689009":"九号公司-WD", "sz000001":"平安银行", "sh600519":"贵州茅台"]
+    let expected = ["sz300750":"宁德时代", "sz300059":"东方财富", "sz301269":"华大九天", "sz301236":"软通动力", "sh688981":"中芯国际", "sh689009":"九号公司-WD", "sz000001":"平安银行", "sh600519":"贵州茅台", "sz159915":"创业板ETF易方达"]
     #expect(Set(parsed.keys) == Set(expected.keys))
     for (id, name) in expected { #expect(parsed[id]?.name == name) }
     #expect(parsed["sz300750"]?.change == dec("17.19"))
     #expect(parsed["sz301269"]?.percent == dec("10.97"))
     #expect(parsed["sz399006"] == nil)
-    #expect(parsed["sz159915"] == nil)
+    #expect(parsed["sz159915"]?.last == dec("2.702"))
 }
 
 @Test func rejectsSecurityCategoriesThatDoNotMatchTheBoard() {
@@ -178,7 +216,7 @@ private func record(_ raw: String = "sh600519", changes: [Int: String] = [:]) ->
     #expect(throws: (any Error).self) { try JSONDecoder().decode(StockSymbol.self,from:invalid) }
 }
 
-@Test func parsesCapturedLiveAShareRowsAndRejectsETFAndIndex() throws {
+@Test func parsesCapturedLiveAShareAndETFRowsAndRejectsIndex() throws {
     let captured = """
     v_sh600519="1~贵州茅台~600519~1335.00~1318.49~1311.84~57686~31159~26527~1333.00~6~1331.00~2~1330.00~2~1329.50~3~1329.02~1~1335.00~116~1335.01~2~1335.14~2~1335.19~1~1335.20~1~~20261023161458~16.51~1.25~1343.88~1310.00~1335.00/57686/7677216283~57686~767722~0.46~20.49~~1343.88~1310.00~2.57~16688.59~16688.59~6.64~1450.34~1186.64~1.53~-108~1330.86~18.74~20.27~~~0.02~767721.6283~120.1500~9~   A~GP-A~-1.05~0.45~3.90~32.41~27.30~1539.98~1151.01~5.70~5.37~3.33~1250081601~1250081601~-79.41~0.90~1250081601~~~-5.72~0.57~~CNY~0~___D__F__N~1335.41~-44~";
     v_sz000001="51~平安银行~000001~11.20~11.30~11.27~1448806~695504~753301~11.20~9557~11.19~12196~11.18~7747~11.17~8122~11.16~9094~11.21~554~11.22~2801~11.23~2036~11.24~2851~11.25~2394~~20261023161500~-0.10~-0.88~11.35~11.17~11.20/1448806/1628277173~1448806~162828~0.75~5.00~~11.35~11.17~1.59~2173.44~2173.46~0.46~12.43~10.17~1.26~36080~11.24~4.16~5.10~~~0.18~162827.7173~25.5360~228~   A~GP-A~3.69~-2.61~5.44~7.93~0.72~11.89~9.74~-3.36~-1.42~3.41~19405684991~19405918198~62.91~7.06~19405684991~~~1.62~0.09~~CNY~0~~11.11~16500~";
@@ -189,12 +227,13 @@ private func record(_ raw: String = "sh600519", changes: [Int: String] = [:]) ->
     v_sh510300="1~沪深300ETF华泰柏瑞~510300~4.178~4.107~4.080~37556082~22353880~15202202~4.178~31015~4.177~39935~4.176~12886~4.175~8912~4.174~6044~4.179~6605~4.180~12856~4.181~1659~4.182~1973~4.183~5183~~20261023161441~0.071~1.73~4.186~4.031~4.178/37556082/15423238067~37556082~1542324~11.47~~~4.186~4.031~3.77~1367.45~1367.45~0.00~4.518~3.696~1.70~70516~4.107~~~~~~1542323.8067~359.1409~8596~   A~ETF~-9.76~-1.37~~~~5.095~4.031~-4.72~-7.81~-12.72~32729887700~32729887700~55.49~-11.67~32729887700~0.05~4.1759~-8.98~0.10~4.1093~CNY~0~___D__F__N~4.186~-14735~";
     """
     let parsed = QuoteParser.parse(captured)
-    #expect(parsed.count == 5)
+    #expect(parsed.count == 6)
     #expect(parsed["sh600519"]?.last == 1335)
     #expect(parsed["sz000001"]?.percent == dec("-0.88"))
     #expect(parsed["bj920002"]?.last == dec("52.64"))
     #expect(parsed["bj430047"]?.timestamp == date("2026-10-23T01:00:00Z"))
-    #expect(parsed["sz399001"] == nil && parsed["sh510300"] == nil)
+    #expect(parsed["sz399001"] == nil)
+    #expect(parsed["sh510300"]?.change == dec("0.071"))
     #expect(!MarketClock.isFresh(try #require(parsed["bj430047"]), now:friday))
 }
 
@@ -245,7 +284,7 @@ private func record(_ raw: String = "sh600519", changes: [Int: String] = [:]) ->
     #expect(state.items[0].rule.upThreshold == 5 && state.items[0].rule.delivery == .silent)
     #expect(state.delivered == ["sh600519|up|5":"2026-10-23"])
     #expect(state.pinnedSymbol == "sh600519" && state.compactRows)
-    #expect(state.aliases == ["sh600519":"A01"] && state.nextAliasIndex == 2)
+    #expect(state.aliases == ["sh600519":"GZMT"] && state.nextAliasIndex == 1)
     #expect(state.unreadAlerts.isEmpty)
 }
 
@@ -267,19 +306,19 @@ private func record(_ raw: String = "sh600519", changes: [Int: String] = [:]) ->
     let b = WatchItem(symbol:try StockSymbol("000001"),name:"B")
     let c = WatchItem(symbol:try StockSymbol("300750"),name:"C")
     var state = SavedState(items:[a,b], aliases:[a.id:"A02"])
-    #expect(state.aliases[b.id] == "A01" && state.nextAliasIndex == 3)
+    #expect(state.aliases[b.id] == "B" && state.nextAliasIndex == 1)
     state.items.removeAll { $0.id == b.id }; state.aliases.removeValue(forKey:b.id)
     state.items.append(c); state.assignMissingAliases()
-    #expect(state.aliases[a.id] == "A02" && state.aliases[c.id] == "A03")
+    #expect(state.aliases[a.id] == "A02" && state.aliases[c.id] == "C")
     state.assignMissingAliases()
-    #expect(state.nextAliasIndex == 4)
+    #expect(state.nextAliasIndex == 1)
 }
 
 @Test func rejectsDamagedNewFieldsAndInvalidAliases() throws {
     let item = WatchItem(symbol:try StockSymbol("600519"),name:"A")
     let base = try JSONEncoder().encode(SavedState(items:[item]))
     let object = try #require(JSONSerialization.jsonObject(with:base) as? [String:Any])
-    for (key,value): (String,Any) in [("schemaVersion",3),("schemaVersion",NSNull()),("aliases",NSNull()),("aliases",[item.id:""]), ("aliases",[item.id:"a b"]),("aliases",[item.id:"a\nb"]),("aliases",[item.id:"123456789"]),("nextAliasIndex",0),("nextAliasIndex","2"),("unreadAlerts",NSNull()),("unreadAlerts",[["key":"broken","day":"2026-02-30","symbol":["rawValue":item.id],"percent":3]])] {
+    for (key,value): (String,Any) in [("aliasNamingVersion",2),("aliasNamingVersion",NSNull()),("schemaVersion",3),("schemaVersion",NSNull()),("aliases",NSNull()),("aliases",[item.id:""]), ("aliases",[item.id:"a b"]),("aliases",[item.id:"a\nb"]),("aliases",[item.id:"123456789"]),("nextAliasIndex",0),("nextAliasIndex","2"),("unreadAlerts",NSNull()),("unreadAlerts",[["key":"broken","day":"2026-02-30","symbol":["rawValue":item.id],"percent":3]])] {
         var changed = object; changed[key] = value
         #expect(throws:(any Error).self) { try JSONDecoder().decode(SavedState.self,from:JSONSerialization.data(withJSONObject:changed)) }
     }

@@ -59,8 +59,9 @@ struct SignedNumber: View {
     let value: Decimal?
     var suffix = ""
     var size: CGFloat = 12
+    var digits: Int = 2
     var body: some View {
-        Text(value.map { UI.number($0, signed: true) + suffix } ?? "—")
+        Text(value.map { UI.number($0, signed: true, digits: digits) + suffix } ?? "—")
             .font(.system(size: size, weight: .regular)).monospacedDigit()
             .foregroundColor(value.map(UI.color) ?? .secondary).lineLimit(1).minimumScaleFactor(0.75)
     }

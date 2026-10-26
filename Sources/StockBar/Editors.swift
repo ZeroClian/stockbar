@@ -33,33 +33,81 @@ struct AddStockView: View {
     @ObservedObject var store: AppStore
     @ViewState private var code = ""
     @ViewState private var addTask: Task<Void, Never>?
+    @ViewState private var addingID: String?
+    @StateObject private var search: StockSearchModel
     @FocusState private var focused: Bool
+    init(store: AppStore, search: StockSearchModel? = nil) {
+        self.store = store
+        _search = StateObject(wrappedValue: search ?? StockSearchModel())
+    }
     var body: some View {
         VStack(spacing: 0) {
             PanelHeader(store: store, title: "添加", subtitle: "")
             VStack(alignment: .leading, spacing: 10) {
-                TextField("六位代码，例如 300750", text: $code)
+                TextField("代码 / 拼音简写，如 NDSD", text: $code)
                     .textFieldStyle(.roundedBorder).focused($focused)
-                    .accessibilityLabel("股票代码").onSubmit { add() }
-                Text("沪深北 A 股 · 含创业板、科创板")
+                    .accessibilityLabel("股票或 ETF 代码、拼音首字母")
+                    .onChange(of: code) { search.updateQuery($0) }
+                    .onSubmit { search.updateQuery(code, immediately: true) }
+                Text("沪深北 A 股 · 沪深场内 ETF")
                     .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                if search.isSearching {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text("搜索中…").foregroundColor(.secondary)
+                    }
+                }
+                if let message = search.message {
+                    Text(message).font(.system(size: 10)).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("重新搜索") { search.updateQuery(code, immediately: true) }
+                }
+                if !search.results.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(search.results) { result in
+                            resultRow(result)
+                            if result.id != search.results.last?.id { Divider() }
+                        }
+                    }
+                }
                 HStack {
                     Spacer()
-                    if store.isAdding { ProgressView().controlSize(.mini) }
-                    Button("取消") { store.route = .home }
-                    Button("添加") { add() }
-                        .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isAdding || !store.storageHealthy)
+                    Button("完成") { store.route = .home }
                 }
             }.font(.system(size: 11)).controlSize(.small).padding(12)
-        }.onAppear { focused = true }.onDisappear { addTask?.cancel() }
+        }.onAppear { focused = true }.onDisappear { addTask?.cancel(); search.cancel() }
     }
-    private func add() {
+
+    private func resultRow(_ result: StockSearchResult) -> some View {
+        let added = store.state.items.contains { $0.id == result.id }
+        return HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(result.name).lineLimit(1).help(result.name)
+                Text(result.symbol.marketName + " " + result.symbol.code)
+                    .font(.system(size: 9)).foregroundColor(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if addingID == result.id {
+                ProgressView().controlSize(.mini).frame(width: 24, height: 28)
+            } else {
+                Button { add(result) } label: {
+                    Image(systemName: added ? "checkmark" : "plus")
+                        .font(.system(size: 12)).frame(width: 24, height: 28).contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                    .disabled(added || store.isAdding || !store.storageHealthy)
+                    .help(added ? "已添加" : "添加 " + result.name)
+                    .accessibilityLabel((added ? "已添加 " : "添加 ") + result.name + " " + result.symbol.code)
+            }
+        }.padding(.vertical, 6)
+    }
+
+    private func add(_ result: StockSearchResult) {
         guard addTask == nil else { return }
+        addingID = result.id
+        store.error = nil
         addTask = Task {
-            defer { addTask = nil }
-            if await store.add(code), !Task.isCancelled, store.route == .add {
+            defer { addTask = nil; addingID = nil }
+            if await store.add(result.id), !Task.isCancelled, store.route == .add {
                 store.showHoldings = false
-                store.route = .home
             }
         }
     }
@@ -78,9 +126,17 @@ struct StockEditor: View {
     @ViewState private var up: String
     @ViewState private var down: String
     @ViewState private var delivery: AlertDelivery
+    @ViewState private var alertSection: Int
+    @ViewState private var priceRule: PriceAlertRule
+    @ViewState private var holdingRule: HoldingAlertRule
+    @ViewState private var abovePrice: String
+    @ViewState private var belowPrice: String
+    @ViewState private var profitTarget: String
+    @ViewState private var lossTarget: String
     @ViewState private var saving = false
     @ViewState private var saveTask: Task<Void, Never>?
     @ViewState private var confirmRemoval = false
+    @ViewState private var confirmClearHolding = false
 
     init(store: AppStore, item: WatchItem, initialAlerts: Bool) {
         self.store = store; self.item = item
@@ -94,18 +150,41 @@ struct StockEditor: View {
         _up = ViewState(initialValue: UI.input(item.rule.upThreshold))
         _down = ViewState(initialValue: UI.input(item.rule.downThreshold))
         _delivery = ViewState(initialValue: item.rule.delivery)
+        _priceRule = ViewState(initialValue: item.rule.price)
+        _holdingRule = ViewState(initialValue: item.rule.holding)
+        _abovePrice = ViewState(initialValue: UI.input(item.rule.price.above))
+        _belowPrice = ViewState(initialValue: UI.input(item.rule.price.below))
+        _profitTarget = ViewState(initialValue: UI.input(item.rule.holding.profit))
+        _lossTarget = ViewState(initialValue: UI.input(item.rule.holding.loss))
+        _alertSection = ViewState(initialValue: item.rule.upEnabled || item.rule.downEnabled ? 0 :
+            item.rule.price.aboveEnabled || item.rule.price.belowEnabled ? 1 :
+            item.rule.holding.profitEnabled || item.rule.holding.lossEnabled ? 2 : 0)
     }
     var body: some View {
         VStack(spacing: 0) {
             PanelHeader(store: store, title: store.displayName(item),
                         subtitle: store.revealed ? item.symbol.marketName + " " + item.symbol.code : "", showPrivacy: true)
-            Picker("股票设置", selection: $alerts) {
+            priceSummary
+            Picker("自选项设置", selection: $alerts) {
                 Text("持仓").tag(false); Text("提醒").tag(true)
             }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 12).padding(.top, 10).disabled(saving)
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: alerts ? 8 : 10) {
                 if alerts { alertForm } else { holdingForm }
                 HStack(spacing: 7) {
-                    if !alerts { Button("移出") { confirmRemoval = true }.buttonStyle(.plain).disabled(!store.storageHealthy) }
+                    if !alerts {
+                        Button("移出") { confirmRemoval = true }.buttonStyle(.plain).disabled(!store.storageHealthy)
+                        Button("清空持仓") { confirmClearHolding = true }
+                            .buttonStyle(.plain)
+                            .disabled(saving || !store.storageHealthy || !store.state.items.contains { $0.id == item.id && $0.holding != Holding() })
+                            .confirmationDialog("清空 \(store.displayName(item)) 的持仓？", isPresented: $confirmClearHolding, titleVisibility: .visible) {
+                                Button("清空持仓", role: .destructive) {
+                                    if store.clearHolding(item.id) { shares = "0"; cost = "0" }
+                                }
+                                Button("取消", role: .cancel) {}
+                            } message: {
+                                Text("仅将此项的数量和成本归零，保留自选、代号及提醒。确认后立即保存，取消编辑不会撤销。")
+                            }
+                    }
                     Spacer(minLength: 0)
                     if saving { ProgressView().controlSize(.mini) }
                     Button("取消") { store.route = .home }
@@ -119,11 +198,36 @@ struct StockEditor: View {
         } message: { Text("本地持仓与提醒设置将一并删除，不影响券商账户。") }
         .onDisappear { saveTask?.cancel() }
     }
+    private var priceSummary: some View {
+        let quote = store.quotes[item.id]
+        return VStack(spacing: 5) {
+            HStack(alignment: .bottom, spacing: 4) {
+                priceColumn("当日最高价", value: quote?.dayHigh)
+                priceColumn("当前价格", value: quote?.last, prominent: true)
+                priceColumn("当日最低价", value: quote?.dayLow)
+            }
+            Text(store.quoteLabel(item.id))
+                .font(.system(size: 9)).foregroundColor(.secondary)
+                .lineLimit(1).minimumScaleFactor(0.8)
+        }.padding(.horizontal, 12).padding(.top, 12)
+    }
+    private func priceColumn(_ title: String, value: Decimal?, prominent: Bool = false) -> some View {
+        VStack(spacing: 5) {
+            Text(title).font(.system(size: 9)).foregroundColor(.secondary)
+            Text(value.map { UI.number($0, digits: item.symbol.priceFractionDigits) } ?? "—")
+                .font(.system(size: prominent ? 18 : 14, weight: prominent ? .medium : .regular))
+                .monospacedDigit().lineLimit(1).minimumScaleFactor(0.65)
+                .frame(height: 22, alignment: .bottom)
+        }.frame(maxWidth: .infinity)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+            .accessibilityValue(value.map { UI.number($0, digits: item.symbol.priceFractionDigits) + " 元" } ?? "暂无行情")
+    }
     private var holdingForm: some View {
         Group {
             entry("代号", value: $alias, numeric: false)
             if store.revealed {
-                entry("持仓股数", value: $shares)
+                entry(item.symbol.isETF ? "持仓份数" : "持仓股数", value: $shares)
                 entry("平均成本", value: $cost)
             } else {
                 HStack {
@@ -135,7 +239,9 @@ struct StockEditor: View {
             }
             Toggle("设为状态栏选中项", isOn: $pin).toggleStyle(.checkbox)
             DisclosureGroup("计算说明") {
-                Text("当日估算＝每股涨跌 × 当前股数。\n浮动盈亏＝（现价 − 平均成本）× 当前股数。\n股数填 0 清空持仓；不计日内交易、卖出收益或分红。")
+                Text(item.symbol.isETF
+                     ? "当日估算＝每份涨跌 × 当前份数。\n浮动盈亏＝（现价 − 每份平均成本）× 当前份数。\n份数填 0 清空持仓；不计日内交易、卖出收益或分红。"
+                     : "当日估算＝每股涨跌 × 当前股数。\n浮动盈亏＝（现价 − 平均成本）× 当前股数。\n股数填 0 清空持仓；不计日内交易、卖出收益或分红。")
                     .font(.system(size: 10)).foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 3)
             }
@@ -143,8 +249,29 @@ struct StockEditor: View {
     }
     private var alertForm: some View {
         Group {
-            threshold("上涨达到", enabled: $upEnabled, value: $up)
-            threshold("下跌达到", enabled: $downEnabled, value: $down)
+            Picker("提醒条件", selection: $alertSection) {
+                Text("涨跌幅").tag(0); Text("价格").tag(1); Text("盈亏").tag(2)
+            }.pickerStyle(.segmented).labelsHidden()
+            if alertSection == 0 {
+                threshold("上涨达到", enabled: $upEnabled, value: $up)
+                threshold("下跌达到", enabled: $downEnabled, value: $down)
+            } else if alertSection == 1 {
+                threshold("价格涨到", enabled: $priceRule.aboveEnabled, value: $abovePrice, unit: "元")
+                threshold("价格跌到", enabled: $priceRule.belowEnabled, value: $belowPrice, unit: "元")
+            } else {
+                if store.revealed {
+                    Picker("浮动盈亏", selection: $holdingRule.unit) {
+                        Text("金额（元）").tag(HoldingAlertUnit.amount)
+                        Text("比例（%）").tag(HoldingAlertUnit.percent)
+                    }.help("按单项持仓浮动盈亏判断，亏损阈值填正数；数量或成本为零时暂停。")
+                    threshold("盈利达到", enabled: $holdingRule.profitEnabled, value: $profitTarget, unit: holdingRule.unit == .amount ? "元" : "%")
+                    threshold("亏损达到", enabled: $holdingRule.lossEnabled, value: $lossTarget, unit: holdingRule.unit == .amount ? "元" : "%")
+                } else {
+                    Button("显示盈亏提醒以编辑") { store.revealed = true }
+                }
+            }
+            Text(enabledAlertSummary).font(.system(size: 9)).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Picker("提醒方式", selection: $delivery) {
                 Text("静默小点").tag(AlertDelivery.silent)
                 Text("系统通知").tag(AlertDelivery.system)
@@ -152,39 +279,53 @@ struct StockEditor: View {
             Text(delivery == .silent ? "只亮小点，无横幅、无声音。" : "需系统通知权限；通知使用代号，不含金额。")
                 .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             DisclosureGroup("触发规则") {
-                Text("每条规则每天一次。仅在应用运行、交易时段内且当日行情有效时判断。休眠、休市、旧行情不提醒。")
+                Text("每条规则每天一次。达到或越过阈值即满足；保存后已达标会在下一次有效行情提醒。三类条件可同时启用。盈亏按此项持仓的浮动盈亏判断，亏损阈值填正数；数量或成本为零时暂停。收起面板继续监测；休眠、休市、旧行情不提醒。")
                     .font(.system(size: 10)).foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 3)
             }
         }
     }
+    private var enabledAlertSummary: String {
+        let flags = [(upEnabled, "涨幅"), (downEnabled, "跌幅"),
+                     (priceRule.aboveEnabled, "涨到"), (priceRule.belowEnabled, "跌到"),
+                     (holdingRule.profitEnabled, "盈利"), (holdingRule.lossEnabled, "亏损")]
+        let labels = flags.filter { $0.0 }.map { $0.1 }
+        return labels.isEmpty ? "尚未开启提醒条件" : "已开启：" + labels.joined(separator: "、")
+    }
     private func entry(_ title: String, value: Binding<String>, numeric: Bool = true) -> some View {
         HStack(spacing: 8) {
             Text(title).foregroundColor(.secondary)
             Spacer(minLength: 4)
-            TextField(numeric ? "0" : "A01", text: value)
+            TextField(numeric ? "0" : "GZMT", text: value)
                 .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing)
                 .monospacedDigit().frame(width: 142).accessibilityLabel(title)
         }
     }
-    private func threshold(_ title: String, enabled: Binding<Bool>, value: Binding<String>) -> some View {
+    private func threshold(_ title: String, enabled: Binding<Bool>, value: Binding<String>, unit: String = "%") -> some View {
         HStack(spacing: 6) {
             Toggle(title, isOn: enabled).toggleStyle(.checkbox)
             Spacer(minLength: 0)
             TextField("3", text: value).textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing).monospacedDigit().frame(width: 65)
-                .disabled(!enabled.wrappedValue).accessibilityLabel(title + "百分比")
-            Text("%").foregroundColor(.secondary)
+                .disabled(!enabled.wrappedValue).accessibilityLabel(title + "（" + unit + "）")
+            Text(unit).foregroundColor(.secondary)
         }
     }
     private func save() {
         guard !saving else { return }
         store.error = nil
         if alerts {
+            guard let above = UI.decimal(abovePrice), let below = UI.decimal(belowPrice),
+                  let profit = UI.decimal(profitTarget), let loss = UI.decimal(lossTarget),
+                  above > 0, below > 0, profit > 0, loss > 0 else {
+                store.error = "价格和盈亏阈值需填写大于零的数值，最多四位小数。"; return
+            }
+            var price = priceRule; price.above = above; price.below = below
+            var holding = holdingRule; holding.profit = profit; holding.loss = loss
             saving = true
             let sourceRoute = store.route
             saveTask = Task {
-                if await store.saveRule(id: item.id, upEnabled: upEnabled, downEnabled: downEnabled, up: up, down: down, delivery: delivery),
+                if await store.saveRule(id: item.id, upEnabled: upEnabled, downEnabled: downEnabled, up: up, down: down, delivery: delivery, price: price, holding: holding),
                    !Task.isCancelled, store.route == sourceRoute { store.route = .home }
                 saving = false
             }
@@ -216,7 +357,7 @@ struct SettingsView: View {
                 Divider()
                 DisclosureGroup("系统通知 · " + permissionText, isExpanded: expansion(.notifications)) {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text("仅对主动选择系统通知的股票发送。专注模式可能影响横幅。")
+                        Text("仅对主动选择系统通知的自选项发送。专注模式可能影响横幅。")
                             .fixedSize(horizontal: false, vertical: true)
                         HStack {
                             Button("测试通知") { testing = true; testTask = Task { await store.testNotification(); testing = false } }.disabled(testing)
@@ -276,7 +417,7 @@ struct RefreshSettingsView: View {
                         .disabled(!store.storageHealthy)
                 }
                 Text(store.refreshDescription)
-                Text("5–300 秒；间隔越长，提醒可能越晚。午休、周末和节假日不刷新；添加股票时仍会查询验证代码。")
+                Text("5–300 秒；间隔越长，提醒可能越晚。午休、周末和节假日不刷新；添加自选时仍会查询验证代码。")
                 Text("内置 2026 年交易日历，超出范围会暂停并提示更新。")
             }.font(.system(size: 10)).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true).padding(.top, 6)

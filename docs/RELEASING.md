@@ -8,14 +8,37 @@
 6. 为已验证提交创建 v<版本> 标签并推送；使用对应 docs/releases/<版本>.md 创建 Release，上传上述三个文件。
 7. 下载公开资产，比较 SHA-256，确认远程 main、标签与本地提交一致，确认 Release 为公开状态。
 
+一键更新使用 GitHub API 中 ZIP 资产的 `digest`（`sha256:…`），只识别 `Tickfin-<版本>-<arm64|x86_64>.zip`。发布后须确认 digest 非空且与本地 ZIP 一致；保留签名、Bundle ID 和 `StockBar` 可执行名称。未来更新包应保留应用的启动确认协议，否则更新助手会回滚。更换签名策略时同步验证自动更新。
+
+本地开发安装使用 `TICKFIN_WORK_ROOT=<项目临时目录>/build.noindex bash scripts/install-local.sh`；先退出应用，脚本只替换 `/Applications/Tickfin.app`，并清理构建的临时应用包。不要在每次开发后从不同目录启动 `.app`，否则 Spotlight/启动台会登记多个副本。构建缓存与发布产物不作为安装副本运行。
+
 示例（版本需与 Info.plist 一致）：
 
 ```bash
-git tag -a v1.2.0 -m 'Tickfin v1.2.0'
-git push origin v1.2.0
-gh release create v1.2.0 --verify-tag --title 'Tickfin v1.2.0' \
-  --notes-file docs/releases/v1.2.0.md \
-  dist/Tickfin-1.2.0-arm64.dmg dist/Tickfin-1.2.0-arm64.zip dist/SHA256SUMS.txt
+git tag -a v1.2.1 -m 'Tickfin v1.2.1'
+git push origin v1.2.1
+gh release create v1.2.1 --verify-tag --title 'Tickfin v1.2.1' \
+  --notes-file docs/releases/v1.2.1.md \
+  dist/Tickfin-1.2.1-arm64.dmg dist/Tickfin-1.2.1-arm64.zip dist/SHA256SUMS.txt
 ```
 
 当前打包脚本使用 ad-hoc 签名，不包含 Apple 凭证，不执行公证。未来若加入 Developer ID 和公证，应使用受保护的发布环境与密钥存储，并同步更新安装说明；不得把证书密码或私钥提交到仓库。
+
+## 仓库外构建与打包
+
+以下路径由维护者指定，避免把开发缓存或临时应用登记为多个安装副本；CI 可继续使用脚本默认的 `.build` / `dist`。
+
+```bash
+# 将此路径改为本机项目临时目录，勿提交绝对路径或产物
+export TICKFIN_WORK_ROOT="/path/to/project-temp/release.noindex"
+export TICKFIN_TEST_ROOT="$TICKFIN_WORK_ROOT/tests"
+export TICKFIN_BUILD_ROOT="$TICKFIN_WORK_ROOT/build"
+export TICKFIN_APP_PATH="$TICKFIN_WORK_ROOT/Tickfin.app"
+export TICKFIN_RELEASE_DIR="$TICKFIN_WORK_ROOT/packages"
+mkdir -p "$TICKFIN_WORK_ROOT/runtime"
+export TMPDIR="$TICKFIN_WORK_ROOT/runtime/"
+bash scripts/test.sh
+bash scripts/package-release.sh
+```
+
+自定义输出目录时，`gh release create` 的三个资产路径也应改为 `$TICKFIN_RELEASE_DIR/...`。打包脚本会清理 DMG 临时组装目录，但保留构建出的应用以便维护者校验；上传并验收后删除临时 `.app` 与回下载副本。不要运行它们，日常只启动固定位置的正式应用。源码不包含构建缓存、发布包或个人数据。

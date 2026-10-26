@@ -7,11 +7,17 @@ public enum StockCoreError: LocalizedError {
     }
 }
 
-/// A normalized ordinary A-share code. A matching live provider response is still
+/// A normalized A-share or mainland-listed ETF code. A matching provider response is still
 /// required to establish that the security actually exists.
 public struct StockSymbol: Codable, Hashable, Sendable {
     public let rawValue: String
     public var code: String { String(rawValue.suffix(6)) }
+    public var isETF: Bool { rawValue.hasPrefix("sh5") || rawValue.hasPrefix("sz15") }
+    public var priceFractionDigits: Int { isETF ? 3 : 2 }
+    // SSE code allocation guide, 2026 revision 3; SZSE ETF expansion (2023-08-25).
+    // https://www.sse.com.cn/lawandrules/guide/stock/jyglywznylc/zn/c/c_20260831_10830435.shtml
+    // https://www.szse.cn/marketServices/technicalservice/notice/t20230825_602945.html
+    private static let shETFPrefixes = ["510", "511", "512", "513", "515", "516", "517", "518", "520", "526", "530", "551", "560", "561", "562", "563", "565", "566", "567", "581", "587", "588", "589"]
     public var marketName: String {
         switch rawValue.prefix(2) { case "sh": return "沪市"; case "sz": return "深市"; default: return "北交所" }
     }
@@ -20,13 +26,15 @@ public struct StockSymbol: Codable, Hashable, Sendable {
         let suppliedMarket = value.count == 8 ? String(value.prefix(2)) : nil
         let code = suppliedMarket == nil ? value : String(value.dropFirst(2))
         guard code.count == 6, code.utf8.allSatisfy({ (48...57).contains($0) }) else {
-            throw StockCoreError.invalidValue("请输入六位普通 A 股代码")
+            throw StockCoreError.invalidValue("请输入六位 A 股或 ETF 交易代码")
         }
         let market: String
         if ["600", "601", "603", "605", "688", "689"].contains(where: code.hasPrefix) { market = "sh" }
         else if ["000", "001", "002", "003", "300", "301"].contains(where: code.hasPrefix) { market = "sz" }
         else if ["920", "43", "83", "87", "88"].contains(where: code.hasPrefix) { market = "bj" }
-        else { throw StockCoreError.invalidValue("仅支持沪深北普通 A 股，不支持指数或 ETF") }
+        else if Self.shETFPrefixes.contains(where: code.hasPrefix) { market = "sh" }
+        else if ["158", "159"].contains(where: code.hasPrefix) { market = "sz" }
+        else { throw StockCoreError.invalidValue("仅支持沪深北 A 股及沪深场内 ETF，不支持指数、LOF 或场外基金") }
         guard suppliedMarket == nil || suppliedMarket == market else { throw StockCoreError.invalidValue("代码与交易所不匹配") }
         rawValue = market + code
     }
@@ -35,7 +43,7 @@ public struct StockSymbol: Codable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let raw = try container.decode(String.self, forKey: .rawValue)
         try self.init(raw)
-        guard raw == rawValue else { throw StockCoreError.invalidValue("保存的股票代码格式无效") }
+        guard raw == rawValue else { throw StockCoreError.invalidValue("保存的证券代码格式无效") }
     }
 }
 
@@ -47,14 +55,20 @@ public struct Quote: Codable, Equatable, Sendable {
     /// Percentage points, e.g. 3 means +3%.
     public var percent: Decimal
     public var timestamp: Date
+    /// Intraday extremes for the quote's trading date. Nil for legacy caches or unavailable values.
+    public var dayHigh: Decimal?
+    public var dayLow: Decimal?
     public var change: Decimal { last - previousClose }
-    public init(symbol: StockSymbol, name: String, last: Decimal, previousClose: Decimal, percent: Decimal, timestamp: Date) {
+    public init(symbol: StockSymbol, name: String, last: Decimal, previousClose: Decimal, percent: Decimal, timestamp: Date, dayHigh: Decimal? = nil, dayLow: Decimal? = nil) {
         self.symbol = symbol; self.name = name; self.last = last; self.previousClose = previousClose; self.percent = percent; self.timestamp = timestamp
+        self.dayHigh = dayHigh; self.dayLow = dayLow
     }
     public var isValid: Bool {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !last.isNaN, last > 0, !previousClose.isNaN, previousClose > 0,
               !percent.isNaN, !change.isNaN, timestamp.timeIntervalSinceReferenceDate.isFinite else { return false }
+        if let dayHigh, dayHigh.isNaN || dayHigh < last { return false }
+        if let dayLow, dayLow.isNaN || dayLow <= 0 || dayLow > last { return false }
         // Tencent displays percentage points to two decimal places. Accept at most
         // half of that display unit, including either tie rounding convention.
         // Apply this invariant here so direct Quote values cannot bypass parsing.
@@ -70,7 +84,7 @@ public struct Holding: Codable, Equatable, Sendable {
     public var averageCost: Decimal
     public init(quantity: Int = 0, averageCost: Decimal = 0) { self.quantity = quantity; self.averageCost = averageCost }
     public func validate() throws {
-        guard quantity >= 0, !averageCost.isNaN, averageCost >= 0 else { throw StockCoreError.invalidValue("股数和平均成本必须为有限非负数") }
+        guard quantity >= 0, !averageCost.isNaN, averageCost >= 0 else { throw StockCoreError.invalidValue("持仓数量和平均成本必须为有限非负数") }
         guard !(averageCost * Decimal(quantity)).isNaN else { throw StockCoreError.invalidValue("持仓金额超出支持范围") }
     }
     public func dailyProfit(_ quote: Quote) -> Decimal { quote.change * Decimal(quantity) }
@@ -85,16 +99,20 @@ public struct Holding: Codable, Equatable, Sendable {
 public enum AlertDelivery: String, Codable, Sendable { case silent, system }
 
 public struct AlertRule: Codable, Equatable, Sendable {
+    public var price: PriceAlertRule
+    public var holding: HoldingAlertRule
+    public var hasEnabledRule: Bool { upEnabled || downEnabled || price.aboveEnabled || price.belowEnabled || holding.profitEnabled || holding.lossEnabled }
     public var delivery: AlertDelivery
     public var upEnabled: Bool
     public var downEnabled: Bool
     public var upThreshold: Decimal
     public var downThreshold: Decimal
-    public init(upEnabled: Bool = false, downEnabled: Bool = false, upThreshold: Decimal = 3, downThreshold: Decimal = 2, delivery: AlertDelivery = .silent) {
+    public init(upEnabled: Bool = false, downEnabled: Bool = false, upThreshold: Decimal = 3, downThreshold: Decimal = 2, delivery: AlertDelivery = .silent, price: PriceAlertRule = PriceAlertRule(), holding: HoldingAlertRule = HoldingAlertRule()) {
+        self.price = price; self.holding = holding
         self.delivery = delivery
         self.upEnabled = upEnabled; self.downEnabled = downEnabled; self.upThreshold = upThreshold; self.downThreshold = downThreshold
     }
-    private enum CodingKeys: String, CodingKey { case upEnabled, downEnabled, upThreshold, downThreshold, delivery }
+    private enum CodingKeys: String, CodingKey { case upEnabled, downEnabled, upThreshold, downThreshold, delivery, price, holding }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         upEnabled = try c.decode(Bool.self, forKey: .upEnabled)
@@ -102,10 +120,13 @@ public struct AlertRule: Codable, Equatable, Sendable {
         upThreshold = try c.decode(Decimal.self, forKey: .upThreshold)
         downThreshold = try c.decode(Decimal.self, forKey: .downThreshold)
         delivery = c.contains(.delivery) ? try c.decode(AlertDelivery.self, forKey: .delivery) : .silent
+        price = c.contains(.price) ? try c.decode(PriceAlertRule.self, forKey: .price) : PriceAlertRule()
+        holding = c.contains(.holding) ? try c.decode(HoldingAlertRule.self, forKey: .holding) : HoldingAlertRule()
         try validate()
     }
     public func validate() throws {
         guard !upThreshold.isNaN, upThreshold > 0, !downThreshold.isNaN, downThreshold > 0 else { throw StockCoreError.invalidValue("提醒阈值必须是有限且大于零的数值") }
+        try price.validate(); try holding.validate()
     }
 }
 
@@ -121,8 +142,11 @@ public struct WatchItem: Codable, Equatable, Identifiable, Sendable {
 public enum MenuMode: String, Codable, Sendable { case icon, stock, dailyProfit }
 
 public struct SavedState: Codable, Equatable, Sendable {
+    public var aliasNamingVersion: Int
     public var refreshIntervalSeconds: Int
     public var globalShortcut: GlobalShortcut?
+    public var previousStockShortcut: GlobalShortcut?
+    public var nextStockShortcut: GlobalShortcut?
     public var schemaVersion: Int
     public var aliases: [String: String]
     public var nextAliasIndex: Int
@@ -134,20 +158,25 @@ public struct SavedState: Codable, Equatable, Sendable {
     /// Rule identity -> Shanghai calendar date. Committed atomically with silent unread alerts or after successful system submission.
     public var delivered: [String: String]
     public init(items: [WatchItem] = [], pinnedSymbol: String? = nil, menuMode: MenuMode = .icon, compactRows: Bool = false, delivered: [String: String] = [:], schemaVersion: Int = 2, aliases: [String: String] = [:], nextAliasIndex: Int = 1, unreadAlerts: [PendingAlert] = [], globalShortcut: GlobalShortcut? = nil, refreshIntervalSeconds: Int = 15) {
+        self.aliasNamingVersion = 1
         self.refreshIntervalSeconds = refreshIntervalSeconds
         self.globalShortcut = globalShortcut
         self.schemaVersion = schemaVersion; self.aliases = aliases; self.nextAliasIndex = nextAliasIndex; self.unreadAlerts = unreadAlerts
         self.items = items; self.pinnedSymbol = pinnedSymbol; self.menuMode = menuMode; self.compactRows = compactRows; self.delivered = delivered
         assignMissingAliases()
     }
-    private enum CodingKeys: String, CodingKey { case refreshIntervalSeconds, globalShortcut, schemaVersion, items, pinnedSymbol, menuMode, compactRows, delivered, aliases, nextAliasIndex, unreadAlerts }
+    private enum CodingKeys: String, CodingKey { case aliasNamingVersion, refreshIntervalSeconds, globalShortcut, previousStockShortcut, nextStockShortcut, schemaVersion, items, pinnedSymbol, menuMode, compactRows, delivered, aliases, nextAliasIndex, unreadAlerts }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let version = c.contains(.schemaVersion) ? try c.decode(Int.self, forKey: .schemaVersion) : 1
         guard version == 1 || version == 2 else { throw StockCoreError.invalidValue("保存的数据版本不受支持") }
         schemaVersion = 2
+        let legacyAliases = !c.contains(.aliasNamingVersion)
+        aliasNamingVersion = legacyAliases ? 1 : try c.decode(Int.self, forKey: .aliasNamingVersion)
         refreshIntervalSeconds = c.contains(.refreshIntervalSeconds) ? try c.decode(Int.self, forKey: .refreshIntervalSeconds) : 15
         globalShortcut = try c.decodeIfPresent(GlobalShortcut.self, forKey: .globalShortcut)
+        previousStockShortcut = try c.decodeIfPresent(GlobalShortcut.self, forKey: .previousStockShortcut)
+        nextStockShortcut = try c.decodeIfPresent(GlobalShortcut.self, forKey: .nextStockShortcut)
         items = try c.decode([WatchItem].self, forKey: .items)
         pinnedSymbol = try c.decodeIfPresent(String.self, forKey: .pinnedSymbol)
         let savedMode = try c.decode(MenuMode.self, forKey: .menuMode)
@@ -158,24 +187,38 @@ public struct SavedState: Codable, Equatable, Sendable {
         nextAliasIndex = c.contains(.nextAliasIndex) ? try c.decode(Int.self, forKey: .nextAliasIndex) : 1
         unreadAlerts = c.contains(.unreadAlerts) ? try c.decode([PendingAlert].self, forKey: .unreadAlerts) : []
         guard nextAliasIndex > 0 else { throw StockCoreError.invalidValue("代号序号无效") }
+        // Validate old data before migration; never silently repair corrupt aliases.
+        try validate()
+        if legacyAliases {
+            for item in items {
+                guard let alias = aliases[item.id], alias.hasPrefix("A"),
+                      let index = Int(alias.dropFirst()), index > 0, index < nextAliasIndex,
+                      alias == String(format: "A%02lld", index) else { continue }
+                // The old format did not store provenance. Only allocated Axx values
+                // are migration candidates; all other user aliases stay reserved.
+                aliases.removeValue(forKey: item.id)
+            }
+        }
         assignMissingAliases()
         try validate()
     }
-    /// Stable, monotonically allocated names; stale aliases also reserve their values.
+    /// Generate once; saved custom and stale aliases reserve their values.
     public mutating func assignMissingAliases() {
-        guard nextAliasIndex > 0 else { return }
         var used = Set(aliases.values)
         for item in items where aliases[item.id] == nil {
-            while nextAliasIndex < Int.max && used.contains(String(format: "A%02lld", nextAliasIndex)) { nextAliasIndex += 1 }
-            guard nextAliasIndex < Int.max else { return }
-            let alias = String(format: "A%02lld", nextAliasIndex)
-            aliases[item.id] = alias; used.insert(alias); nextAliasIndex += 1
+            let alias = DefaultAlias.make(for: item, reserved: used)
+            aliases[item.id] = alias; used.insert(alias)
         }
-        while nextAliasIndex < Int.max && used.contains(String(format: "A%02lld", nextAliasIndex)) { nextAliasIndex += 1 }
     }
     public func validate() throws {
+        guard aliasNamingVersion == 1 else { throw StockCoreError.invalidValue("代号规则版本不受支持") }
         guard (5...300).contains(refreshIntervalSeconds) else { throw StockCoreError.invalidValue("刷新间隔必须是 5–300 秒的整数") }
         try globalShortcut?.validate()
+        try previousStockShortcut?.validate(); try nextStockShortcut?.validate()
+        let shortcuts = [globalShortcut, previousStockShortcut, nextStockShortcut].compactMap { $0 }
+        for i in shortcuts.indices where shortcuts[(i + 1)...].contains(shortcuts[i]) {
+            throw StockCoreError.invalidValue("不同操作不能使用相同的快捷键")
+        }
         guard schemaVersion == 2, nextAliasIndex > 0, nextAliasIndex < Int.max else { throw StockCoreError.invalidValue("保存的数据版本或代号序号无效") }
         var usedAliases = Set<String>()
         for (symbol, alias) in aliases {
@@ -198,10 +241,7 @@ public struct SavedState: Codable, Equatable, Sendable {
         }
         if let pinnedSymbol, !ids.contains(pinnedSymbol) { throw StockCoreError.invalidValue("状态栏股票不在自选列表内") }
         for (key, day) in delivered {
-            let parts = key.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-            guard parts.count == 3, let symbol = try? StockSymbol(parts[0]), symbol.rawValue == parts[0],
-                  ["up", "down"].contains(parts[1]), let threshold = strictDecimal(parts[2]), threshold > 0,
-                  validDay(day) else { throw StockCoreError.invalidValue("提醒去重记录无效") }
+            guard AlertKey(key) != nil, validDay(day) else { throw StockCoreError.invalidValue("提醒去重记录无效") }
         }
     }
 }
@@ -211,24 +251,28 @@ public struct PendingAlert: Codable, Equatable, Identifiable, Sendable {
     public var day: String
     public var symbol: StockSymbol
     public var percent: Decimal
+    public var triggerValue: Decimal?
+    public var kind: AlertKind { AlertKey(key)?.kind ?? .up }
+    public var value: Decimal { triggerValue ?? percent }
     public var id: String { day + "|" + key }
-    public init(key: String, day: String, symbol: StockSymbol, percent: Decimal) {
+    public init(key: String, day: String, symbol: StockSymbol, percent: Decimal, triggerValue: Decimal? = nil) {
         self.key = key; self.day = day; self.symbol = symbol; self.percent = percent
+        self.triggerValue = triggerValue
     }
-    private enum CodingKeys: String, CodingKey { case key, day, symbol, percent }
+    private enum CodingKeys: String, CodingKey { case key, day, symbol, percent, triggerValue }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         key = try c.decode(String.self, forKey: .key)
         day = try c.decode(String.self, forKey: .day)
         symbol = try c.decode(StockSymbol.self, forKey: .symbol)
         percent = try c.decode(Decimal.self, forKey: .percent)
+        triggerValue = try c.decodeIfPresent(Decimal.self, forKey: .triggerValue)
         try validate()
     }
     public func validate() throws {
-        let parts = key.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 3, parts[0] == symbol.rawValue, ["up", "down"].contains(parts[1]),
-              let threshold = strictDecimal(parts[2]), threshold > 0, validDay(day), !percent.isNaN,
-              (parts[1] == "up" ? percent >= threshold : percent <= -threshold) else { throw StockCoreError.invalidValue("未读提醒无效") }
+        guard let identity = AlertKey(key), identity.symbol == symbol, validDay(day), !percent.isNaN,
+              (identity.kind == .up || identity.kind == .down || triggerValue != nil),
+              identity.kind.reached(value, threshold: identity.threshold) else { throw StockCoreError.invalidValue("未读提醒无效") }
     }
 }
 
@@ -249,7 +293,10 @@ public enum QuoteParser {
                   let last = strictDecimal(fields[3]), let previous = strictDecimal(fields[4]),
                   let change = strictDecimal(fields[31]), let percent = strictDecimal(fields[32]),
                   let timestamp = parseTimestamp(fields[30]) else { continue }
-            let quote = Quote(symbol: symbol, name: fields[1].trimmingCharacters(in: .whitespacesAndNewlines), last: last, previousClose: previous, percent: percent, timestamp: timestamp)
+            // Optional range fields must not discard an otherwise valid current price.
+            let high = strictDecimal(fields[33]).flatMap { $0 > 0 && $0 >= last ? $0 : nil }
+            let low = strictDecimal(fields[34]).flatMap { $0 > 0 && $0 <= last ? $0 : nil }
+            let quote = Quote(symbol: symbol, name: fields[1].trimmingCharacters(in: .whitespacesAndNewlines), last: last, previousClose: previous, percent: percent, timestamp: timestamp, dayHigh: high, dayLow: low)
             guard quote.isValid, quote.change == change else { continue }
             // If a provider repeats a symbol, retain its most recent valid row.
             if let old = quotes[raw], old.timestamp > timestamp { continue }
@@ -259,6 +306,7 @@ public enum QuoteParser {
     }
 
     private static func securityCategory(for symbol: StockSymbol) -> String {
+        if symbol.isETF { return "ETF" }
         if symbol.rawValue.hasPrefix("bj") { return "GP" }
         // Tencent identifies ChiNext and STAR with separate A-share categories.
         // Match the code's board explicitly instead of accepting arbitrary GP-* types.
@@ -295,12 +343,13 @@ public enum MarketClock {
 }
 
 public struct AlertCandidate: Equatable, Sendable {
+    public var value: Decimal?
     public var key: String
     public var day: String
     public var symbol: StockSymbol
     public var title: String
     public var body: String
-    public init(key: String, day: String, symbol: StockSymbol, title: String, body: String) { self.key = key; self.day = day; self.symbol = symbol; self.title = title; self.body = body }
+    public init(key: String, day: String, symbol: StockSymbol, title: String, body: String, value: Decimal? = nil) { self.key = key; self.day = day; self.symbol = symbol; self.title = title; self.body = body; self.value = value }
 }
 
 public enum AlertEvaluator {
@@ -311,18 +360,26 @@ public enum AlertEvaluator {
         let day = MarketClock.day(now)
         for item in items {
             guard (try? item.rule.validate()) != nil, let quote = quotes[item.id], quote.symbol == item.symbol, MarketClock.isFresh(quote, now: now) else { continue }
-            let checks: [(String, Bool, Decimal, Bool)] = [
-                ("up", item.rule.upEnabled, item.rule.upThreshold, quote.percent >= item.rule.upThreshold),
-                ("down", item.rule.downEnabled, item.rule.downThreshold, quote.percent <= -item.rule.downThreshold)
+            var checks: [(AlertKind, Bool, Decimal, Decimal)] = [
+                (.up, item.rule.upEnabled, item.rule.upThreshold, quote.percent),
+                (.down, item.rule.downEnabled, item.rule.downThreshold, quote.percent),
+                (.priceAbove, item.rule.price.aboveEnabled, item.rule.price.above, quote.last),
+                (.priceBelow, item.rule.price.belowEnabled, item.rule.price.below, quote.last)
             ]
-            for (direction, enabled, threshold, reached) in checks where enabled && reached {
+            if (try? item.holding.validate()) != nil, item.holding.quantity > 0, item.holding.averageCost > 0 {
+                let rule = item.rule.holding
+                let amount = rule.unit == .amount
+                if let value = amount ? item.holding.floatingProfit(quote) : item.holding.profitPercent(quote), !value.isNaN {
+                    checks.append((amount ? .profitAmount : .profitPercent, rule.profitEnabled, rule.profit, value))
+                    checks.append((amount ? .lossAmount : .lossPercent, rule.lossEnabled, rule.loss, value))
+                }
+            }
+            for (kind, enabled, threshold, value) in checks where enabled && kind.reached(value, threshold: threshold) {
                 let thresholdText = NSDecimalNumber(decimal: threshold).stringValue
-                let key = "\(item.id)|\(direction)|\(thresholdText)"
+                let key = "\(item.id)|\(kind.rawValue)|\(thresholdText)"
                 guard delivered[key] != day, seen.insert(key).inserted else { continue }
-                let label = direction == "up" ? "上涨" : "下跌"
-                let sign = direction == "up" ? "+" : "−"
-                let percent = NSDecimalNumber(decimal: quote.percent).stringValue
-                result.append(AlertCandidate(key: key, day: day, symbol: item.symbol, title: "\(item.name)\(label)提醒", body: "涨跌幅 \(quote.percent >= 0 ? "+" : "")\(percent)%，已达到 \(sign)\(thresholdText)% 阈值"))
+                let unit = kind.usesPercent ? "%" : "元"
+                result.append(AlertCandidate(key: key, day: day, symbol: item.symbol, title: "\(item.name)\(kind.label)", body: "\(kind.label)：\(value)\(unit)，已达到 \(thresholdText)\(unit) 阈值", value: value))
             }
         }
         return result

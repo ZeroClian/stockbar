@@ -83,7 +83,7 @@ struct HomeView: View {
                         }
                     } label: { Image(systemName: "pin").font(.system(size: 11)) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().frame(width: 24)
-                    .help("快速切换状态栏关注股票").accessibilityLabel("切换状态栏关注股票")
+                    .help("快速切换状态栏关注项").accessibilityLabel("切换状态栏关注项")
                     .disabled(!store.storageHealthy)
                     IconButton(symbol: "arrow.up.arrow.down", label: "自选排序") { store.route = .sorting }
                         .disabled(!store.storageHealthy)
@@ -115,7 +115,8 @@ struct HomeView: View {
                 HStack(spacing: 6) {
                     Text(store.revealed ? "名称" : "代号").frame(maxWidth: .infinity, alignment: .leading)
                     Text(store.showHoldings ? "当日 · 元" : "涨跌幅").frame(width: 72, alignment: .trailing)
-                    Text(store.showHoldings ? "浮动 · 元" : "涨跌 · 元/股").frame(width: 76, alignment: .trailing)
+                    Text(store.showHoldings ? "浮动 · 元" : "涨跌 · 元").frame(width: 76, alignment: .trailing)
+                        .help(store.showHoldings ? "持仓浮动盈亏" : "股票为每股涨跌额，ETF 为每份涨跌额")
                 }.font(.system(size: 10)).foregroundColor(.secondary).padding(.horizontal, 12).frame(height: 22)
                 ScrollView {
                     LazyVStack(spacing: 0) {
@@ -128,7 +129,7 @@ struct HomeView: View {
                 Text(TradingSchedule.isOpen(store.now) ? (store.latestTime.map { UI.time($0) } ?? "等待行情") : store.marketLabel)
                     .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1).help(store.refreshDescription)
                 Spacer(minLength: 0)
-                IconButton(symbol: "plus", label: "添加股票") { store.message = nil; store.route = .add }.disabled(!store.storageHealthy)
+                IconButton(symbol: "plus", label: "添加股票或 ETF") { store.message = nil; store.route = .add }.disabled(!store.storageHealthy)
                 IconButton(symbol: store.hasUnreadAlerts ? "bell.badge" : "bell", label: store.hasUnreadAlerts ? "查看提醒" : "提醒设置", active: store.hasUnreadAlerts) {
                     if store.hasUnreadAlerts { store.route = .inbox }
                     else if let item = store.state.items.first(where: { $0.id == store.state.pinnedSymbol }) ?? store.state.items.first { store.route = .edit(item.id, true) }
@@ -175,7 +176,8 @@ struct StockRow: View {
             SignedNumber(value: quote.map { q in
                 if store.showHoldings { return first ? item.holding.dailyProfit(q) : item.holding.floatingProfit(q) }
                 return first ? q.percent : q.change
-            }, suffix: !store.showHoldings && first ? "%" : "")
+            }, suffix: !store.showHoldings && first ? "%" : "",
+               digits: !store.showHoldings && !first ? item.symbol.priceFractionDigits : 2)
         }
     }
 }
@@ -184,7 +186,7 @@ struct AlertInbox: View {
     @ObservedObject var store: AppStore
     var body: some View {
         VStack(spacing: 0) {
-            PanelHeader(store: store, title: "提醒", subtitle: "")
+            PanelHeader(store: store, title: "提醒", subtitle: "", showPrivacy: true)
             VStack(alignment: .leading, spacing: 10) {
                 if store.previewDot { Text("静默提醒测试：只亮小点，无横幅和声音。") }
                 ForEach(store.state.unreadAlerts) { alert in
@@ -193,10 +195,16 @@ struct AlertInbox: View {
                             HStack {
                                 Text(store.displayName(item))
                                 Spacer(minLength: 4)
-                                Text(UI.number(alert.percent, signed: true) + "%").monospacedDigit()
+                                if alert.kind.isHolding && !store.revealed {
+                                    Text("••••").accessibilityLabel("持仓盈亏已隐藏")
+                                } else {
+                                    Text(UI.number(alert.value, signed: !alert.kind.isPrice,
+                                                   digits: alert.kind.isPrice ? item.symbol.priceFractionDigits : 2)
+                                         + (alert.kind.usesPercent ? "%" : " 元")).monospacedDigit()
+                                }
                             }
                         }.buttonStyle(.plain)
-                        Text(alert.day + " · 达到设置条件").font(.system(size: 10)).foregroundColor(.secondary)
+                        Text(alert.day + " · " + alert.kind.label).font(.system(size: 10)).foregroundColor(.secondary)
                     }
                 }
                 if !store.hasUnreadAlerts { Text("暂无未读提醒").foregroundColor(.secondary) }

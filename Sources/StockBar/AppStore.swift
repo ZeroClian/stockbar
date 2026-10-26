@@ -47,10 +47,13 @@ final class AppStore: ObservableObject {
         didSet { if oldValue != route { navigationRevision &+= 1; isRecordingShortcut = false } }
     }
     @Published var isRecordingShortcut = false
+    @Published var recordingShortcutAction: ShortcutAction = .togglePanel
     @Published var expandedSettings: Set<SettingsSection> = []
     @Published private(set) var shortcutError: String?
     let updateChecker: UpdateChecker
     let shortcutManager: GlobalShortcutManager
+    let previousShortcutManager: GlobalShortcutManager
+    let nextShortcutManager: GlobalShortcutManager
     var onShortcutToggle: (() -> Void)?
     @Published var showHoldings = false
     @Published var revealed = false
@@ -74,7 +77,11 @@ final class AppStore: ObservableObject {
     init(dataDirectory: URL? = nil, service: any QuoteProviding = QuoteService(),
          notifications: (any NotificationSending)? = nil, shortcutBackend: (any ShortcutRegistering)? = nil, scheduler: (any RefreshScheduling)? = nil, updateChecker: UpdateChecker? = nil, clock: @escaping () -> Date = Date.init) {
         self.updateChecker = updateChecker ?? UpdateChecker()
-        self.shortcutManager = GlobalShortcutManager(backend: shortcutBackend ?? CarbonShortcutBackend())
+        // One backend allocates unique Carbon IDs across all three actions.
+        let backend = shortcutBackend ?? CarbonShortcutBackend()
+        self.shortcutManager = GlobalShortcutManager(backend: backend)
+        self.previousShortcutManager = GlobalShortcutManager(backend: backend)
+        self.nextShortcutManager = GlobalShortcutManager(backend: backend)
         self.scheduler = scheduler ?? RefreshScheduler()
         self.service = service
         self.notifications = notifications ?? NotificationService()
@@ -90,10 +97,16 @@ final class AppStore: ObservableObject {
             let ids = Set(state.items.map(\.id))
             quotes = cached.filter { ids.contains($0.key) && $0.value.isValid && $0.key == $0.value.symbol.rawValue }
         }
-        shortcutManager.onActivate = { [weak self] in
-            guard let self else { return }
-            if self.isRecordingShortcut { self.isRecordingShortcut = false; self.shortcutError = nil }
-            else { self.onShortcutToggle?() }
+        for action in ShortcutAction.allCases {
+            manager(for: action).onActivate = { [weak self] in
+                guard let self else { return }
+                if self.isRecordingShortcut { self.isRecordingShortcut = false; self.shortcutError = nil; return }
+                switch action {
+                case .togglePanel: self.onShortcutToggle?()
+                case .previousStock: self.cycleStock(offset: -1)
+                case .nextStock: self.cycleStock(offset: 1)
+                }
+            }
         }
     }
 
@@ -116,6 +129,7 @@ final class AppStore: ObservableObject {
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
         wakeObserver = nil
         shortcutManager.stop()
+        previousShortcutManager.stop(); nextShortcutManager.stop()
     }
 
     func synchronizeClock() { now = clock() }
@@ -246,12 +260,21 @@ final class AppStore: ObservableObject {
         catch { if !Task.isCancelled, revision == navigationRevision { self.error = error.localizedDescription }; return false }
     }
 
+    @discardableResult func clearHolding(_ id: String) -> Bool {
+        guard let index = state.items.firstIndex(where: { $0.id == id }) else { return false }
+        var next = state
+        next.items[index].holding = Holding()
+        guard commit(next) else { return false }
+        message = "此项持仓已清空，自选与提醒已保留。"
+        return true
+    }
+
     func saveHolding(id: String, quantity: String, cost: String, pin: Bool, alias: String? = nil) -> Bool {
         guard let i = state.items.firstIndex(where: { $0.id == id }) else { return false }
         guard quantity.range(of: #"^\d+$"#, options: .regularExpression) != nil,
               let shares = Int(quantity), shares <= 100_000_000,
               let average = UI.decimal(cost), average <= 10_000_000 else {
-            error = "股数需为 0–1 亿的整数，成本需为 0–1000 万元，最多 4 位小数。"; return false
+            error = "持仓数量需为 0–1 亿的整数，成本需为 0–1000 万元，最多 4 位小数。"; return false
         }
         var next = state
         if let alias {
@@ -270,7 +293,7 @@ final class AppStore: ObservableObject {
         message = "持仓已保存"; return true
     }
 
-    func saveRule(id: String, upEnabled: Bool, downEnabled: Bool, up: String, down: String, delivery: AlertDelivery? = nil) async -> Bool {
+    func saveRule(id: String, upEnabled: Bool, downEnabled: Bool, up: String, down: String, delivery: AlertDelivery? = nil, price: PriceAlertRule? = nil, holding: HoldingAlertRule? = nil) async -> Bool {
         guard !Task.isCancelled, state.items.contains(where: { $0.id == id }) else { return false }
         let revision = navigationRevision
         guard let upValue = UI.decimal(up), let downValue = UI.decimal(down),
@@ -278,7 +301,14 @@ final class AppStore: ObservableObject {
             error = "提醒阈值需大于 0 且不超过 999%。"; return false
         }
         let channel = delivery ?? state.items.first(where: { $0.id == id })!.rule.delivery
-        if channel == .system && (upEnabled || downEnabled) {
+        var rule = state.items.first(where: { $0.id == id })!.rule
+        rule.upEnabled = upEnabled; rule.downEnabled = downEnabled
+        rule.upThreshold = upValue; rule.downThreshold = downValue; rule.delivery = channel
+        if let price { rule.price = price }
+        if let holding { rule.holding = holding }
+        do { try rule.validate() }
+        catch { self.error = error.localizedDescription; return false }
+        if channel == .system && rule.hasEnabledRule {
             await updatePermission()
             guard !Task.isCancelled, revision == navigationRevision else { return false }
             if notificationStatus == .notDetermined {
@@ -290,30 +320,51 @@ final class AppStore: ObservableObject {
         }
         guard !Task.isCancelled, revision == navigationRevision, let i = state.items.firstIndex(where: { $0.id == id }) else { return false }
         var next = state
-        next.items[i].rule.upEnabled = upEnabled
-        next.items[i].rule.downEnabled = downEnabled
-        next.items[i].rule.upThreshold = upValue
-        next.items[i].rule.downThreshold = downValue
-        next.items[i].rule.delivery = channel
+        next.items[i].rule = rule
         guard commit(next) else { return false }
-        message = channel == .system && notificationStatus == .denied && (upEnabled || downEnabled)
+        message = channel == .system && notificationStatus == .denied && rule.hasEnabledRule
             ? "规则已保存；需在系统设置允许通知后才能收到提醒。" : "提醒已保存，下一次有效行情开始判断。"
         return true
     }
 
     func restoreGlobalShortcut() {
         guard storageHealthy else { return }
-        do {
-            try shortcutManager.replace(state.globalShortcut) { _ in true }
-            shortcutError = nil
-        } catch { shortcutError = "已保存的快捷键当前不可用，请清除或重新设置。" }
+        var failed: [String] = []
+        for action in ShortcutAction.allCases {
+            do { try manager(for: action).replace(shortcut(for: action)) { _ in true } }
+            catch { failed.append(action.title) }
+        }
+        shortcutError = failed.isEmpty ? nil : failed.joined(separator: "、") + "快捷键不可用，请重新设置。"
     }
 
-    @discardableResult func setGlobalShortcut(_ shortcut: GlobalShortcut?) -> Bool {
+    func shortcut(for action: ShortcutAction) -> GlobalShortcut? {
+        switch action {
+        case .togglePanel: return state.globalShortcut
+        case .previousStock: return state.previousStockShortcut
+        case .nextStock: return state.nextStockShortcut
+        }
+    }
+
+    func manager(for action: ShortcutAction) -> GlobalShortcutManager {
+        switch action {
+        case .togglePanel: return shortcutManager
+        case .previousStock: return previousShortcutManager
+        case .nextStock: return nextShortcutManager
+        }
+    }
+
+    @discardableResult func setGlobalShortcut(_ shortcut: GlobalShortcut?, action: ShortcutAction = .togglePanel) -> Bool {
+        guard shortcut == nil || !ShortcutAction.allCases.contains(where: { $0 != action && self.shortcut(for: $0) == shortcut }) else {
+            shortcutError = "这组快捷键已用于其他操作，请换一组。"; return false
+        }
         do {
-            let saved = try shortcutManager.replace(shortcut) { value in
+            let saved = try manager(for: action).replace(shortcut) { value in
                 var next = state
-                next.globalShortcut = value
+                switch action {
+                case .togglePanel: next.globalShortcut = value
+                case .previousStock: next.previousStockShortcut = value
+                case .nextStock: next.nextStockShortcut = value
+                }
                 return commit(next)
             }
             if saved { shortcutError = nil; isRecordingShortcut = false }
@@ -364,6 +415,13 @@ final class AppStore: ObservableObject {
         _ = commit(next)
     }
 
+    func cycleStock(offset: Int) {
+        guard state.items.count > 1, offset == -1 || offset == 1 else { return }
+        let index = state.items.firstIndex(where: { $0.id == state.pinnedSymbol }) ?? 0
+        let next = (index + offset + state.items.count) % state.items.count
+        pinStock(state.items[next].id)
+    }
+
     func saveSettings(mode: MenuMode? = nil, compact: Bool? = nil) {
         var next = state
         if let mode { next.menuMode = mode }
@@ -392,8 +450,8 @@ final class AppStore: ObservableObject {
                 guard notificationStatus == .authorized || notificationStatus == .provisional else { continue }
             }
             // Settings may change while macOS handles an asynchronous notification request.
-            guard AlertEvaluator.candidates(items: state.items, quotes: freshQuotes, delivered: state.delivered, now: clock())
-                .contains(where: { $0.key == candidate.key && $0.day == candidate.day }),
+            guard let currentCandidate = AlertEvaluator.candidates(items: state.items, quotes: freshQuotes, delivered: state.delivered, now: clock())
+                .first(where: { $0.key == candidate.key && $0.day == candidate.day }),
                 state.items.first(where: { $0.id == candidate.symbol.rawValue })?.rule.delivery == delivery else { continue }
             do {
                 if delivery == .system {
@@ -405,7 +463,7 @@ final class AppStore: ObservableObject {
                 next.delivered[candidate.key] = candidate.day
                 next.unreadAlerts = next.unreadAlerts.filter { $0.day == candidate.day }
                 if delivery == .silent, let q = freshQuotes[candidate.symbol.rawValue] {
-                    next.unreadAlerts.append(PendingAlert(key: candidate.key, day: candidate.day, symbol: candidate.symbol, percent: q.percent))
+                    next.unreadAlerts.append(PendingAlert(key: candidate.key, day: candidate.day, symbol: candidate.symbol, percent: q.percent, triggerValue: currentCandidate.value))
                 }
                 guard commit(next) else { break }
             } catch { self.error = "提醒发送失败：\(error.localizedDescription)" }

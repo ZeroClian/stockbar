@@ -5,6 +5,7 @@ import StockCore
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+    private let instanceLock = AppInstanceLock()
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var store: AppStore!
@@ -36,6 +37,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let flag = args.firstIndex(of: "--data-dir"), flag + 1 < args.count {
             customDirectory = URL(fileURLWithPath: args[flag + 1], isDirectory: true)
         } else { customDirectory = nil }
+        let directory = customDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("StockBar")
+        do {
+            guard try instanceLock.acquire(directory: directory) else {
+                if let other = NSRunningApplication.runningApplications(withBundleIdentifier: "local.stockbar.app")
+                    .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }), let url = other.bundleURL {
+                    NSWorkspace.shared.open(url)
+                }
+                NSApp.terminate(nil); return
+            }
+        } catch { NSApp.terminate(nil); return }
         store = AppStore(dataDirectory: customDirectory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -63,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         store.onShortcutToggle = { [weak self] in self?.togglePanel() }
         updateTitle()
         store.start()
+        if store.storageHealthy { UpdateTransaction.acknowledgeLaunch(arguments: args) }
         if args.contains("--show-panel") { showPanel() }
     }
 
@@ -117,11 +129,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 @main
 struct StockBarEntry {
     @MainActor static func main() {
+        if let index = CommandLine.arguments.firstIndex(of: "--apply-update"), index + 1 < CommandLine.arguments.count {
+            do { try UpdateTransaction.apply(planURL: URL(fileURLWithPath: CommandLine.arguments[index + 1])); exit(0) }
+            catch { exit(1) }
+        }
 // Read-only diagnostic entry point: no notifications, settings, or holdings are created.
 if CommandLine.arguments.contains("--check-market") {
     Task {
         do {
-            let symbols = try ["600519", "000001", "300750", "301269", "688981", "920002"].map { try StockSymbol($0) }
+            let symbols = try ["600519", "000001", "300750", "301269", "688981", "920002",
+                               "510300", "159915", "588000", "513100", "518880", "511010", "511990",
+                               "520900", "530060", "551000", "563300"].map { try StockSymbol($0) }
             let quotes = try await QuoteService().fetch(symbols)
             for symbol in symbols {
                 guard let q = quotes[symbol.rawValue] else { throw QuoteServiceError.empty }

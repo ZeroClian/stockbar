@@ -25,6 +25,7 @@ enum UpdateCheckError: Equatable {
     struct Release: Equatable {
         let version: String
         let url: URL
+        var package: UpdatePackage? = nil
     }
 
     enum State: Equatable {
@@ -41,6 +42,7 @@ enum UpdateCheckError: Equatable {
     private static let endpoint = URL(string: "https://api.github.com/repos/ZeroClian/stockbar/releases/latest")!
 
     let currentVersion: String
+    let updater = AppUpdater()
     @Published private(set) var state: State = .idle
     private let request: Request
 
@@ -89,7 +91,8 @@ enum UpdateCheckError: Equatable {
             switch current.compare(to: latest) {
             case .orderedAscending:
                 let url = Self.releasesURL.appendingPathComponent("tag").appendingPathComponent(release.tagName)
-                state = .available(Release(version: latest.display, url: url))
+                let package = UpdatePackage.select(assets: release.assets ?? [], tag: release.tagName, version: latest.display)
+                state = .available(Release(version: latest.display, url: url, package: package))
             case .orderedSame:
                 state = .latest(version: latest.display)
             case .orderedDescending:
@@ -104,9 +107,10 @@ enum UpdateCheckError: Equatable {
         let tagName: String
         let draft: Bool
         let prerelease: Bool
+        let assets: [UpdatePackage.Asset]?
         enum CodingKeys: String, CodingKey {
             case tagName = "tag_name"
-            case draft, prerelease
+            case draft, prerelease, assets
         }
     }
 
