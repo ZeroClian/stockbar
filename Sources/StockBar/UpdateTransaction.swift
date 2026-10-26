@@ -63,6 +63,7 @@ struct UpdateTransaction: Codable, Sendable {
             throw UpdateFailure.helper
         }
         let register = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        var launched = false
         do {
             try plan.replaceAndLaunch { target in
                 try UpdateTools.run("/usr/bin/open", ["-g", target.path, "--args", "--tickfin-update-ack", plan.planURL.path])
@@ -78,6 +79,7 @@ struct UpdateTransaction: Codable, Sendable {
                 }
                 throw UpdateFailure.launch
             }
+            launched = true
             _ = try? UpdateTools.run(register, ["-u", plan.backup.path])
             _ = try? UpdateTools.run(register, ["-f", plan.target.path])
             try? FileManager.default.removeItem(at: errorFile)
@@ -85,10 +87,15 @@ struct UpdateTransaction: Codable, Sendable {
             try FileManager.default.removeItem(at: plan.root)
         } catch {
             try? FileManager.default.createDirectory(at: errorFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? Data("上次更新未完成，已恢复旧版。请重新检查更新。".utf8).write(to: errorFile, options: .atomic)
+            let hasBackup = FileManager.default.fileExists(atPath: plan.backup.path)
+            let message = launched
+                ? "新版已启动，但更新文件未能完全清理。请检查安装目录的写入权限。"
+                : (hasBackup ? "更新及回滚未完成，旧版备份仍保留在 \(plan.backup.path)。请勿删除该目录。"
+                             : "上次更新未完成，已恢复旧版。请重新检查更新。")
+            try? Data(message.utf8).write(to: errorFile, options: .atomic)
             // Never discard a remaining backup if rollback itself failed.
-            if !FileManager.default.fileExists(atPath: plan.backup.path) { try? FileManager.default.removeItem(at: plan.root) }
-            _ = try? UpdateTools.run("/usr/bin/open", ["-g", plan.target.path])
+            if !hasBackup { try? FileManager.default.removeItem(at: plan.root) }
+            if !launched { _ = try? UpdateTools.run("/usr/bin/open", ["-g", plan.target.path]) }
             throw error
         }
     }

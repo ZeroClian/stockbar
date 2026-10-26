@@ -5,7 +5,14 @@ import Foundation
 @MainActor final class AppUpdater: ObservableObject {
     @Published private(set) var isUpdating = false
     @Published private(set) var message: String?
+    private var helperOwnsCleanup = false
     init() { message = try? String(contentsOf: UpdateTransaction.errorFile, encoding: .utf8) }
+
+    func shouldTerminate() -> Bool {
+        guard isUpdating && !helperOwnsCleanup else { return true }
+        message = "正在准备更新，请等待完成后自动重启；准备期间暂不能退出，以确保清理更新文件。"
+        return false
+    }
 
     func install(_ package: UpdatePackage) async {
         guard !isUpdating else { return }
@@ -35,6 +42,7 @@ import Foundation
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             guard ready else { if helper.isRunning { helper.terminate() }; throw UpdateFailure.helper }
+            helperOwnsCleanup = true
             NSApp.terminate(nil)
         } catch {
             if let prepared { try? FileManager.default.removeItem(at: prepared.root) }

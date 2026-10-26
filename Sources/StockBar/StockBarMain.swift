@@ -101,6 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let target = NSSize(width: 280, height: min(store.panelHeightLimit, store.panelContentHeight + statusHeight))
         if popover.contentSize != target { popover.contentSize = target }
     }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        store?.updateChecker.updater.shouldTerminate() == false ? .terminateCancel : .terminateNow
+    }
     func applicationWillTerminate(_ notification: Notification) { store?.stop() }
     func popoverDidClose(_ notification: Notification) { store.resetPrivacy() }
     func applicationDidResignActive(_ notification: Notification) {
