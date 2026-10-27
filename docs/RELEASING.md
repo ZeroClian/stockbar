@@ -24,6 +24,14 @@ gh release create v1.2.1 --verify-tag --title 'Tickfin v1.2.1' \
 
 当前打包脚本使用 ad-hoc 签名，不包含 Apple 凭证，不执行公证。未来若加入 Developer ID 和公证，应使用受保护的发布环境与密钥存储，并同步更新安装说明；不得把证书密码或私钥提交到仓库。
 
+## CI 执行器与容量故障
+
+日常 push / PR 默认使用 `macos-15-intel`，执行同一套测试、构建和打包，产物按实际架构命名。ARM64 验证可在 Actions → CI → Run workflow 中将 `runner` 选择为 `macos-15`；两种架构的运行不会互相取消。Intel CI 成功不能替代 ARM64 安装包验证，也不自动增加公开 Release 的 Intel 支持声明。
+
+若出现 `The job was not acquired by Runner` 并提示 ARM64 capacity constraints，说明 GitHub 未能分配执行器，测试与构建尚未开始。原失败记录不会因修复或新运行自动变绿；查看最新提交的 CI 结果。`Re-run jobs` 会沿用旧提交的工作流，如需切换执行器请使用最新 main 的 Run workflow。
+
+执行器标签参见 [GitHub 官方文档](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
+
 ## 仓库外构建与打包
 
 以下路径由维护者指定，避免把开发缓存或临时应用登记为多个安装副本；CI 可继续使用脚本默认的 `.build` / `dist`。

@@ -43,4 +43,4 @@ bash scripts/render-preview.sh
 bash scripts/package-release.sh --skip-build
 ```
 
-CI 在 macOS runner 上执行测试、构建和打包，不读取个人持仓、不发送系统通知、不把网络行情作为必须成功的测试依赖。实际状态见仓库 Actions；仅当对应提交运行成功才说明该版本 CI 通过。
+CI 默认在 macOS 15 Intel runner 上执行测试、构建和打包；手动运行可选择 macOS 15 ARM64。CI 不读取个人持仓、不发送系统通知、不把网络行情作为必须成功的测试依赖。实际状态见仓库 Actions；仅当对应提交运行成功才说明该架构的 CI 通过。v1.2.1 原提交的 ARM64 运行因 GitHub 执行器分配失败而结束，测试和构建未开始；该基础设施错误不作为代码测试结果。

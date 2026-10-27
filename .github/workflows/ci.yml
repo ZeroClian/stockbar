@@ -4,19 +4,31 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner: Intel for routine CI; ARM64 for release validation'
+        required: true
+        default: macos-15-intel
+        type: choice
+        options:
+          - macos-15-intel
+          - macos-15
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ inputs.runner || 'macos-15-intel' }}
   cancel-in-progress: true
 jobs:
   macos:
-    runs-on: macos-15
+    # Keep routine CI independent of the constrained ARM64 runner pool.
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        run: swift --version
+        run: |
+          uname -m
+          swift --version
       - name: Tests
         run: bash scripts/test.sh
       - name: Build and package
