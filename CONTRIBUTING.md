@@ -12,10 +12,20 @@
 - 提醒规则、网络失败、取消操作、日期与交易时段逻辑应有边界测试。
 - UI 改动提供浅/深色截图，使用虚构数据；验证窄面板及长说明。
 
-提交前运行 `bash scripts/test.sh` 和 `bash scripts/build-app.sh`。UI 改动还应运行 `bash scripts/render-preview.sh` 并实际点选检查；安装流程改动运行 `bash scripts/package-release.sh`。
+提交前运行 `bash scripts/test.sh` 和 `bash scripts/build-app.sh`。UI 改动还应设置仓库外的 `TICKFIN_PREVIEW_DIR` 后运行 `bash scripts/render-preview.sh` 并实际点选检查；安装流程改动运行 `bash scripts/package-release.sh`。
 
 PR 请说明问题、最终行为、验证结果及未覆盖的边界。自动化通过不等于系统横幅、菜单栏操作、不同 macOS 版本都已验证。
 
 ## 报告问题
 
 提供应用版本、macOS 版本、芯片类型、复现步骤、预期和实际结果。行情问题可附证券代码与报价时间。请遮住持仓、账户、用户名，不要上传完整 state.json。敏感安全问题按 SECURITY.md 私下报告。
+
+## 文档图片
+
+原生预览使用固定示例行情、隔离状态文件和通知替身，不访问个人持仓或发送推送。先构建 release，再生成到自己指定的临时目录：
+
+```bash
+TICKFIN_PREVIEW_DIR=/path/to/project-temp/previews bash scripts/render-preview.sh
+```
+
+若构建时设置了 `TICKFIN_BUILD_ROOT`，预览时保持同一值。检查图片后，仅将用于文档的最终 PNG 放入 `docs/screenshots/`；不要提交预览程序、缓存、测试数据或日志。Bark 图片展示完整设置组件，实际偏好页在固定高度面板中滚动。

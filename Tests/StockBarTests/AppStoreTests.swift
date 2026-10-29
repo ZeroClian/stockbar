@@ -445,6 +445,40 @@ private actor PausedQuoteProvider: QuoteProviding {
     #expect(third.state.delivered == receipt)
 }
 
+@MainActor @Test func combinedMenuShowsPercentAndPriceAndSurvivesRestart() async throws {
+    let fixture = try Fixture(alerts: false); defer { fixture.remove() }
+    let mode = try #require(MenuMode(rawValue: "stockPrice"))
+    let store = fixture.store(QuotesStub(.success(try fixture.quotes())), NotificationsStub())
+    store.saveSettings(mode: mode)
+    #expect(store.menuTitle == "—")
+    await store.refresh()
+    #expect(store.menuTitle == "+3.00% · 103.00")
+    store.resetPrivacy()
+    #expect(store.menuTitle == "+3.00% · 103.00")
+    let restored = fixture.store(QuotesStub(.success([:])), NotificationsStub())
+    #expect(restored.state.menuMode == mode)
+    #expect(restored.menuTitle == "+3.00% · 103.00")
+    #expect(restored.state.items == fixture.initial.items)
+}
+
+@MainActor @Test func combinedMenuFollowsStockSwitchAndPreservesETFPrecisionAndStaleness() async throws {
+    let fixture = try Fixture(alerts: false); defer { fixture.remove() }
+    let q = Quote(symbol: try StockSymbol("159915"), name: "创业板ETF", last: Decimal(string: "2.651")!,
+                  previousClose: Decimal(string: "2.702")!, percent: Decimal(string: "-1.89")!, timestamp: tradingNow)
+    var quotes = try fixture.quotes(); quotes[q.symbol.rawValue] = q
+    let store = fixture.store(QuotesStub(.success(quotes)), NotificationsStub())
+    #expect(await store.add("159915"))
+    await store.refresh()
+    store.saveSettings(mode: .stockPrice)
+    #expect(store.menuTitle == "+3.00% · 103.00")
+    store.cycleStock(offset: 1)
+    #expect(store.menuTitle == "−1.89% · 2.651")
+    let restored = fixture.store(QuotesStub(.success([:])), NotificationsStub(), now: tradingNow.addingTimeInterval(181))
+    #expect(restored.menuTitle == "−1.89% · 2.651 · 旧")
+    store.cycleStock(offset: 1)
+    #expect(store.menuTitle == "+3.00% · 103.00")
+}
+
 @MainActor @Test func privacyResetDoesNotExposeStockOrHoldingsInMenu() async throws {
     let fixture = try Fixture(alerts: false); defer { fixture.remove() }
     let store = fixture.store(QuotesStub(.success(try fixture.quotes())), NotificationsStub())

@@ -8,7 +8,7 @@ enum PanelRoute: Equatable {
     case home, add, edit(String, Bool), settings, details, inbox, sorting
 }
 
-enum SettingsSection: Hashable { case refresh, notifications, updates, data }
+enum SettingsSection: Hashable { case refresh, notifications, bark, updates, data }
 
 /// Display-only policy. Alert eligibility remains governed by MarketClock.isFresh.
 enum QuoteDisplayPolicy {
@@ -42,6 +42,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var isAdding = false
     @Published private(set) var storageHealthy = true
     @Published private(set) var notificationStatus: UNAuthorizationStatus = .notDetermined
+    @Published private(set) var hasBarkKey = false
     @Published private(set) var now: Date
     @Published var route: PanelRoute = .home {
         didSet { if oldValue != route { navigationRevision &+= 1; isRecordingShortcut = false } }
@@ -66,6 +67,9 @@ final class AppStore: ObservableObject {
     private let file: StateFile
     private let service: any QuoteProviding
     private let notifications: any NotificationSending
+    private let barkSender: any BarkSending
+    private let barkKeys: any BarkKeyStoring
+    private var barkRetryAfter: [String: Date] = [:]
     private let clock: () -> Date
     private let scheduler: any RefreshScheduling
     private var started = false
@@ -75,7 +79,7 @@ final class AppStore: ObservableObject {
     private var navigationRevision = 0
 
     init(dataDirectory: URL? = nil, service: any QuoteProviding = QuoteService(),
-         notifications: (any NotificationSending)? = nil, shortcutBackend: (any ShortcutRegistering)? = nil, scheduler: (any RefreshScheduling)? = nil, updateChecker: UpdateChecker? = nil, clock: @escaping () -> Date = Date.init) {
+         notifications: (any NotificationSending)? = nil, shortcutBackend: (any ShortcutRegistering)? = nil, scheduler: (any RefreshScheduling)? = nil, updateChecker: UpdateChecker? = nil, barkSender: (any BarkSending)? = nil, barkKeys: (any BarkKeyStoring)? = nil, clock: @escaping () -> Date = Date.init) {
         self.updateChecker = updateChecker ?? UpdateChecker()
         // One backend allocates unique Carbon IDs across all three actions.
         let backend = shortcutBackend ?? CarbonShortcutBackend()
@@ -85,6 +89,8 @@ final class AppStore: ObservableObject {
         self.scheduler = scheduler ?? RefreshScheduler()
         self.service = service
         self.notifications = notifications ?? NotificationService()
+        self.barkSender = barkSender ?? BarkService()
+        self.barkKeys = barkKeys ?? BarkKeychain()
         self.clock = clock
         self.now = clock()
         let directory = dataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -191,10 +197,11 @@ final class AppStore: ObservableObject {
 
     var menuTitle: String {
         // Legacy dailyProfit remains decodable, but never exposes holdings in the menu bar.
-        guard state.menuMode == .stock else { return "" }
+        guard state.menuMode == .stock || state.menuMode == .stockPrice else { return "" }
         guard let item = state.items.first(where: { $0.id == state.pinnedSymbol }) ?? state.items.first,
               let q = quotes[item.id] else { return "—" }
-        return "\(UI.number(q.percent, signed: true))%\(isOld(item.id) ? " · 旧" : "")"
+        let price = state.menuMode == .stockPrice ? " · \(UI.number(q.last, digits: item.symbol.priceFractionDigits))" : ""
+        return "\(UI.number(q.percent, signed: true))%\(price)\(isOld(item.id) ? " · 旧" : "")"
     }
 
     func refresh() async {
@@ -308,6 +315,10 @@ final class AppStore: ObservableObject {
         if let holding { rule.holding = holding }
         do { try rule.validate() }
         catch { self.error = error.localizedDescription; return false }
+        if channel == .bark && rule.hasEnabledRule {
+            do { _ = try configuredBarkKey() }
+            catch { self.error = error.localizedDescription; return false }
+        }
         if channel == .system && rule.hasEnabledRule {
             await updatePermission()
             guard !Task.isCancelled, revision == navigationRevision else { return false }
@@ -325,6 +336,65 @@ final class AppStore: ObservableObject {
         message = channel == .system && notificationStatus == .denied && rule.hasEnabledRule
             ? "规则已保存；需在系统设置允许通知后才能收到提醒。" : "提醒已保存，下一次有效行情开始判断。"
         return true
+    }
+
+    func refreshBarkStatus() {
+        do { hasBarkKey = try barkKeys.read() != nil }
+        catch { self.error = error.localizedDescription }
+    }
+
+    @discardableResult func saveBarkSettings(_ configuration: BarkConfiguration, newKey: String) -> Bool {
+        guard storageHealthy else { return false }
+        var oldKey: String?
+        var changedKey = false
+        do {
+            try configuration.validate()
+            let key = newKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty || configuration.enabled {
+                oldKey = try barkKeys.read()
+                let effective = key.isEmpty ? oldKey : key
+                guard let effective else { throw BarkFailure.missingKey }
+                try BarkFailure.validateKey(effective)
+                if !key.isEmpty { try barkKeys.write(key); changedKey = true }
+            }
+            var next = state; next.bark = configuration
+            guard commit(next) else {
+                if changedKey { try barkKeys.write(oldKey) }
+                return false
+            }
+            if changedKey || configuration.enabled { hasBarkKey = true }
+            barkRetryAfter.removeAll()
+            message = configuration.enabled ? "Bark 已保存；在各自选项的提醒方式中选择 Bark 后生效。" : "Bark 已关闭；使用 Bark 的提醒暂停推送。"
+            return true
+        } catch { self.error = error.localizedDescription; return false }
+    }
+
+    func removeBarkKey() {
+        var next = state; next.bark.enabled = false
+        guard commit(next) else { return }
+        do { try barkKeys.write(nil); hasBarkKey = false; barkRetryAfter.removeAll(); message = "Bark 已关闭，设备密钥已删除。" }
+        catch { self.error = error.localizedDescription }
+    }
+
+    private func configuredBarkKey() throws -> String {
+        guard state.bark.enabled, let key = try barkKeys.read() else { throw BarkFailure.missingKey }
+        try BarkFailure.validateKey(key)
+        return key
+    }
+
+    func testBark() async {
+        let revision = navigationRevision
+        guard !Task.isCancelled, storageHealthy else { return }
+        do {
+            let key = try configuredBarkKey()
+            let message = try BarkPreview.message(configuration: state.bark, test: true)
+            guard !Task.isCancelled, revision == navigationRevision else { return }
+            try await barkSender.send(configuration: state.bark, key: key, message: message)
+            guard !Task.isCancelled, revision == navigationRevision else { return }
+            self.message = "Bark 已确认接收测试通知；手表显示仍取决于 iPhone 锁屏、通知镜像和专注模式。"
+        } catch {
+            if !Task.isCancelled, revision == navigationRevision { self.error = error.localizedDescription }
+        }
     }
 
     func restoreGlobalShortcut() {
@@ -442,9 +512,13 @@ final class AppStore: ObservableObject {
         processingAlerts = true
         defer { processingAlerts = false }
         let candidates = AlertEvaluator.candidates(items: state.items, quotes: freshQuotes, delivered: state.delivered, now: clock())
+        barkRetryAfter = barkRetryAfter.filter { $0.value > clock() }
         for candidate in candidates {
             guard storageHealthy else { break }
             guard let delivery = state.items.first(where: { $0.id == candidate.symbol.rawValue })?.rule.delivery else { continue }
+            if delivery == .bark {
+                guard state.bark.enabled, barkRetryAfter[candidate.key] == nil else { continue }
+            }
             if delivery == .system {
                 await updatePermission()
                 guard notificationStatus == .authorized || notificationStatus == .provisional else { continue }
@@ -458,15 +532,25 @@ final class AppStore: ObservableObject {
                     let alias = state.aliases[candidate.symbol.rawValue] ?? "自选项"
                     try await notifications.send(identifier: "\(candidate.day)|\(candidate.key)", title: "提醒", body: "\(alias) 已达到设置条件，打开速览查看。")
                 }
+                if delivery == .bark {
+                    guard let quote = freshQuotes[candidate.symbol.rawValue] else { continue }
+                    let key = try configuredBarkKey()
+                    let message = try BarkMessage(configuration: state.bark, alias: state.aliases[candidate.symbol.rawValue] ?? "自选项", candidate: currentCandidate, quote: quote)
+                    try await barkSender.send(configuration: state.bark, key: key, message: message)
+                    barkRetryAfter.removeValue(forKey: candidate.key)
+                }
                 var next = state
                 next.delivered = next.delivered.filter { $0.value == candidate.day }
                 next.delivered[candidate.key] = candidate.day
                 next.unreadAlerts = next.unreadAlerts.filter { $0.day == candidate.day }
-                if delivery == .silent, let q = freshQuotes[candidate.symbol.rawValue] {
+                if delivery == .silent || delivery == .bark, let q = freshQuotes[candidate.symbol.rawValue] {
                     next.unreadAlerts.append(PendingAlert(key: candidate.key, day: candidate.day, symbol: candidate.symbol, percent: q.percent, triggerValue: currentCandidate.value))
                 }
                 guard commit(next) else { break }
-            } catch { self.error = "提醒发送失败：\(error.localizedDescription)" }
+            } catch {
+                if delivery == .bark { barkRetryAfter[candidate.key] = clock().addingTimeInterval(60) }
+                self.error = "提醒发送失败：\(error.localizedDescription)"
+            }
         }
     }
 

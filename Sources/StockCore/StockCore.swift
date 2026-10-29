@@ -96,7 +96,7 @@ public struct Holding: Codable, Equatable, Sendable {
     }
 }
 
-public enum AlertDelivery: String, Codable, Sendable { case silent, system }
+public enum AlertDelivery: String, Codable, Sendable { case silent, system, bark }
 
 public struct AlertRule: Codable, Equatable, Sendable {
     public var price: PriceAlertRule
@@ -139,9 +139,10 @@ public struct WatchItem: Codable, Equatable, Identifiable, Sendable {
     public init(symbol: StockSymbol, name: String, holding: Holding = Holding(), rule: AlertRule = AlertRule()) { self.symbol = symbol; self.name = name; self.holding = holding; self.rule = rule }
 }
 
-public enum MenuMode: String, Codable, Sendable { case icon, stock, dailyProfit }
+public enum MenuMode: String, Codable, Sendable { case icon, stock, stockPrice, dailyProfit }
 
 public struct SavedState: Codable, Equatable, Sendable {
+    public var bark = BarkConfiguration()
     public var aliasNamingVersion: Int
     public var refreshIntervalSeconds: Int
     public var globalShortcut: GlobalShortcut?
@@ -165,10 +166,11 @@ public struct SavedState: Codable, Equatable, Sendable {
         self.items = items; self.pinnedSymbol = pinnedSymbol; self.menuMode = menuMode; self.compactRows = compactRows; self.delivered = delivered
         assignMissingAliases()
     }
-    private enum CodingKeys: String, CodingKey { case aliasNamingVersion, refreshIntervalSeconds, globalShortcut, previousStockShortcut, nextStockShortcut, schemaVersion, items, pinnedSymbol, menuMode, compactRows, delivered, aliases, nextAliasIndex, unreadAlerts }
+    private enum CodingKeys: String, CodingKey { case bark, aliasNamingVersion, refreshIntervalSeconds, globalShortcut, previousStockShortcut, nextStockShortcut, schemaVersion, items, pinnedSymbol, menuMode, compactRows, delivered, aliases, nextAliasIndex, unreadAlerts }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let version = c.contains(.schemaVersion) ? try c.decode(Int.self, forKey: .schemaVersion) : 1
+        bark = try c.decodeIfPresent(BarkConfiguration.self, forKey: .bark) ?? BarkConfiguration()
         guard version == 1 || version == 2 else { throw StockCoreError.invalidValue("保存的数据版本不受支持") }
         schemaVersion = 2
         let legacyAliases = !c.contains(.aliasNamingVersion)
@@ -212,6 +214,7 @@ public struct SavedState: Codable, Equatable, Sendable {
     }
     public func validate() throws {
         guard aliasNamingVersion == 1 else { throw StockCoreError.invalidValue("代号规则版本不受支持") }
+        try bark.validate()
         guard (5...300).contains(refreshIntervalSeconds) else { throw StockCoreError.invalidValue("刷新间隔必须是 5–300 秒的整数") }
         try globalShortcut?.validate()
         try previousStockShortcut?.validate(); try nextStockShortcut?.validate()

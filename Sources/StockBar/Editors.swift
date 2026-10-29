@@ -275,8 +275,9 @@ struct StockEditor: View {
             Picker("提醒方式", selection: $delivery) {
                 Text("静默小点").tag(AlertDelivery.silent)
                 Text("系统通知").tag(AlertDelivery.system)
+                Text("Bark 推送").tag(AlertDelivery.bark)
             }
-            Text(delivery == .silent ? "只亮小点，无横幅、无声音。" : "需系统通知权限；通知使用代号，不含金额。")
+            Text(delivery == .silent ? "只亮小点，无横幅、无声音。" : delivery == .bark ? "需在偏好中启用 Bark；发送已配置模板，并保留本机未读提醒。" : "需系统通知权限；通知使用代号，不含金额。")
                 .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             DisclosureGroup("触发规则") {
                 Text("每条规则每天一次。达到或越过阈值即满足；保存后已达标会在下一次有效行情提醒。三类条件可同时启用。盈亏按此项持仓的浮动盈亏判断，亏损阈值填正数；数量或成本为零时暂停。收起面板继续监测；休眠、休市、旧行情不提醒。")
@@ -341,9 +342,10 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             PanelHeader(store: store, title: "偏好", subtitle: "")
             VStack(alignment: .leading, spacing: 10) {
-                Picker("状态栏", selection: Binding(get: { store.state.menuMode == .stock ? MenuMode.stock : .icon }, set: { store.saveSettings(mode: $0) })) {
+                Picker("状态栏", selection: Binding(get: { store.state.menuMode == .dailyProfit ? MenuMode.icon : store.state.menuMode }, set: { store.saveSettings(mode: $0) })) {
                     Text("仅图标").tag(MenuMode.icon)
                     Text("仅涨跌幅").tag(MenuMode.stock)
+                    Text("涨跌幅＋现价").tag(MenuMode.stockPrice)
                 }.disabled(!store.storageHealthy)
                 Text("名称默认代号，金额默认隐藏。\n收起后恢复隐藏；按 Esc 可立即收起。")
                     .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -365,6 +367,7 @@ struct SettingsView: View {
                         }
                     }.font(.system(size: 10)).padding(.top, 6)
                 }
+                BarkSettingsView(store: store, expanded: expansion(.bark))
                 UpdateSettingsView(checker: store.updateChecker, expanded: expansion(.updates))
                 DisclosureGroup("数据与说明", isExpanded: expansion(.data)) {
                     VStack(alignment: .leading, spacing: 7) {
