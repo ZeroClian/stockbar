@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 import UserNotifications
 import StockCore
@@ -7,7 +8,13 @@ import StockCore
 @MainActor private final class BarkKeysStub: BarkKeyStoring {
     var key: String? = "test-device-key"
     var failWrite = false
-    func read() throws -> String? { key }
+    var reads: [Bool] = []
+    var rejectSilentRead = false
+    func read(allowInteraction: Bool) throws -> String? {
+        reads.append(allowInteraction)
+        if rejectSilentRead && !allowInteraction { throw BarkFailure.authorizationRequired }
+        return key
+    }
     func write(_ key: String?) throws {
         if failWrite { throw BarkFailure.keychain }
         self.key = key
@@ -87,8 +94,8 @@ private struct BarkQuotesStub: QuoteProviding {
     store.closePanel()
     await store.refresh()
     #expect(fixture.sender.messages.count == 1 && fixture.notifications.count == 0)
-    #expect(fixture.sender.messages[0].body.contains("GZMT"))
-    #expect(!fixture.sender.messages[0].body.contains("103") && !fixture.sender.messages[0].body.contains("贵州茅台"))
+    #expect(fixture.sender.messages[0].body.contains("股票名称：贵州茅台"))
+    #expect(!fixture.sender.messages[0].body.contains("103") && !fixture.sender.messages[0].body.contains("行情时间"))
     #expect(store.state.delivered["sh600519|up|3"] == "2026-10-23")
     #expect(store.state.unreadAlerts.count == 1)
     let restored = fixture.store()
@@ -135,14 +142,78 @@ private struct BarkQuotesStub: QuoteProviding {
     #expect(!((await store.saveRule(id: "sh600519", upEnabled: true, downEnabled: false, up: "3", down: "2", delivery: .bark))))
 }
 
-@MainActor @Test func barkTestUsesExampleDataAndDoesNotCreateAlertReceipts() async throws {
+@MainActor @Test func barkTestUsesSelectedCodeAndDoesNotCreateAlertReceipts() async throws {
     let fixture = try BarkFixture(); defer { fixture.remove() }
     let store = fixture.store()
     await store.testBark()
     #expect(fixture.sender.messages.count == 1)
     #expect(fixture.sender.messages[0].title.hasPrefix("测试 · "))
     #expect(fixture.sender.messages[0].body.contains("非真实触发"))
+    #expect(fixture.sender.messages[0].body.contains("股票代码：600519"))
+    #expect(fixture.sender.messages[0].body.contains("股票名称：贵州茅台"))
+    #expect(!fixture.sender.messages[0].body.contains("行情时间"))
+    #expect(fixture.sender.messages[0].body.contains("当前价格：xxxx"))
     #expect(store.state.delivered.isEmpty)
     let task = Task { await store.testBark() }; task.cancel(); await task.value
     #expect(fixture.sender.messages.count == 1)
+}
+
+
+@MainActor @Test func barkSettingsViewingNeverReadsKeychainAndSavedKeyIsReused() async throws {
+    let fixture = try BarkFixture(); defer { fixture.remove() }
+    let store = fixture.store()
+    store.refreshBarkStatus(); store.refreshBarkStatus()
+    #expect(fixture.keys.reads.isEmpty)
+    #expect(store.saveBarkSettings(store.state.bark, newKey: ""))
+    #expect(fixture.keys.reads == [true])
+    fixture.keys.rejectSilentRead = true
+    store.refreshBarkStatus()
+    await store.testBark(); await store.refresh()
+    #expect(fixture.keys.reads == [true])
+    #expect(fixture.sender.messages.count == 2)
+    store.removeBarkKey()
+    #expect(!store.hasBarkKey)
+}
+
+@MainActor @Test func barkRestartNeverPromptsAndOnlySaveCanRecoverAuthorization() async throws {
+    let fixture = try BarkFixture(); defer { fixture.remove() }
+    fixture.keys.rejectSilentRead = true
+    let store = fixture.store()
+    store.refreshBarkStatus()
+    #expect(fixture.keys.reads.isEmpty)
+    await store.testBark(); await store.refresh()
+    #expect(fixture.keys.reads == [false, false])
+    #expect(fixture.sender.messages.isEmpty && store.state.delivered.isEmpty)
+    #expect(store.error?.contains("保存") == true)
+    #expect(store.saveBarkSettings(store.state.bark, newKey: ""))
+    #expect(fixture.keys.reads == [false, false, true])
+    await store.refresh()
+    #expect(fixture.sender.messages.count == 1)
+    #expect(fixture.keys.reads == [false, false, true])
+}
+
+
+@MainActor @Test func barkTestFollowsPinnedStockWithCachedPriceAndPreservesReceipts() async throws {
+    let fixture = try BarkFixture(); defer { fixture.remove() }
+    let store = fixture.store()
+    await store.refresh()
+    let receipts = store.state.delivered
+    await store.testBark()
+    #expect(fixture.sender.messages.last?.facts.contains("股票代码：600519") == true)
+    #expect(fixture.sender.messages.last?.facts.contains("当前价格：103.00") == true)
+    #expect(store.state.delivered == receipts)
+}
+
+
+@MainActor @Test func barkKeychainDisallowsAuthenticationUIExceptExplicitSaveRead() throws {
+    var policies: [String] = []
+    let keys = BarkKeychain { request in
+        let policy = request[kSecUseAuthenticationUI as String] as? String ?? "missing"
+        policies.append(policy)
+        if policy == kSecUseAuthenticationUIFail as String { return (errSecInteractionNotAllowed, nil) }
+        return (errSecSuccess, Data("unit-test-key".utf8))
+    }
+    #expect(throws: BarkFailure.self) { try keys.read(allowInteraction: false) }
+    #expect(try keys.read(allowInteraction: true) == "unit-test-key")
+    #expect(policies == [kSecUseAuthenticationUIFail as String, kSecUseAuthenticationUIAllow as String])
 }

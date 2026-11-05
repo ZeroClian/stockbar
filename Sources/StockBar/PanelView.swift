@@ -20,6 +20,7 @@ struct PanelView: View {
                         Color.clear.preference(key: ContentHeightKey.self, value: proxy.size.height)
                     })
             }
+            .id(store.route)
             .frame(height: min(store.panelContentHeight, max(80, store.panelHeightLimit - (hasStatus ? 25 : 0))))
             .onPreferenceChange(ContentHeightKey.self) { height in
                 if height > 0 && abs(store.panelContentHeight - height) > 0.5 { store.panelContentHeight = height }
@@ -51,6 +52,7 @@ struct PanelView: View {
                 StockEditor(store: store, item: item, initialAlerts: alerts).id(id + String(alerts))
             } else { HomeView(store: store) }
         case .settings: SettingsView(store: store)
+        case .settingsPage(let section): SettingsView(store: store, section: section)
         case .sorting: WatchlistSortView(store: store)
         case .details:
             VStack(spacing: 0) {
@@ -118,10 +120,16 @@ struct HomeView: View {
                     Text(store.showHoldings ? "浮动 · 元" : "涨跌 · 元").frame(width: 76, alignment: .trailing)
                         .help(store.showHoldings ? "持仓浮动盈亏" : "股票为每股涨跌额，ETF 为每份涨跌额")
                 }.font(.system(size: 10)).foregroundColor(.secondary).padding(.horizontal, 12).frame(height: 22)
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(items) { item in StockRow(store: store, item: item) }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(items) { item in StockRow(store: store, item: item).id(item.id) }
+                        }
                     }
+                    .onChange(of: store.keyboardSelection) { id in
+                        if let id { proxy.scrollTo(id) }
+                    }
+                    .onAppear { if let id = store.keyboardSelection { proxy.scrollTo(id) } }
                 }.frame(height: min(CGFloat(items.count) * 32, 160))
             }
             Divider()
@@ -129,6 +137,8 @@ struct HomeView: View {
                 Text(TradingSchedule.isOpen(store.now) ? (store.latestTime.map { UI.time($0) } ?? "等待行情") : store.marketLabel)
                     .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1).help(store.refreshDescription)
                 Spacer(minLength: 0)
+                IconButton(symbol: "arrow.clockwise", label: store.isRefreshing ? "正在刷新行情" : "手动刷新行情") { Task { await store.refresh(manually: true) } }
+                    .disabled(store.isRefreshing || store.state.items.isEmpty)
                 IconButton(symbol: "plus", label: "添加股票或 ETF") { store.message = nil; store.route = .add }.disabled(!store.storageHealthy)
                 IconButton(symbol: store.hasUnreadAlerts ? "bell.badge" : "bell", label: store.hasUnreadAlerts ? "查看提醒" : "提醒设置", active: store.hasUnreadAlerts) {
                     if store.hasUnreadAlerts { store.route = .inbox }
@@ -139,7 +149,7 @@ struct HomeView: View {
         }
     }
     private func tab(_ title: String, holdings: Bool) -> some View {
-        Button { store.showHoldings = holdings } label: {
+        Button { store.showKeyboardList(holdings: holdings) } label: {
             Text(title).font(.system(size: 11)).padding(.horizontal, 7).padding(.vertical, 4)
                 .background(store.showHoldings == holdings ? UI.surface : Color.clear).cornerRadius(4)
         }.buttonStyle(.plain).accessibilityAddTraits(store.showHoldings == holdings ? .isSelected : [])
@@ -158,7 +168,7 @@ struct StockRow: View {
     let item: WatchItem
     private var quote: Quote? { store.quotes[item.id] }
     var body: some View {
-        Button { store.message = nil; store.route = .edit(item.id, false) } label: {
+        Button { store.keyboardSelection = item.id; store.message = nil; store.route = .edit(item.id, false) } label: {
             HStack(spacing: 6) {
                 HStack(spacing: 2) {
                     Text(store.displayName(item)).lineLimit(1)
@@ -167,8 +177,11 @@ struct StockRow: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 value(first: true).frame(width: 72, alignment: .trailing)
                 value(first: false).frame(width: 76, alignment: .trailing)
-            }.font(.system(size: 12)).padding(.horizontal, 12).frame(height: 32).contentShape(Rectangle())
+            }.font(.system(size: 12)).padding(.horizontal, 12).frame(height: 32)
+                .background(store.keyboardSelection == item.id ? Color.primary.opacity(0.08) : Color.clear)
+                .contentShape(Rectangle())
         }.buttonStyle(.plain).help(store.quoteLabel(item.id)).accessibilityLabel("编辑 " + store.displayName(item))
+            .accessibilityAddTraits(store.keyboardSelection == item.id ? .isSelected : [])
     }
     @ViewBuilder private func value(first: Bool) -> some View {
         if store.showHoldings && !store.revealed { Text("••••").font(.system(size: 12)) }

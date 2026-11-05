@@ -17,11 +17,11 @@
 <tr>
 <td valign="top"><img src="docs/screenshots/watchlist.png" width="280" alt="股票与 ETF 自选，默认显示拼音代号"></td>
 <td valign="top"><img src="docs/screenshots/holdings-dark.png" width="280" alt="深色持仓视图，点击眼睛后显示示例盈亏"></td>
-<td valign="top"><img src="docs/screenshots/price-alerts.png" width="280" alt="最高价、当前价、最低价，以及到价提醒和 Bark 通道"></td>
+<td valign="top"><img src="docs/screenshots/price-alerts.png" width="280" alt="最高价、当前价、最低价，以及到价提醒"></td>
 </tr>
 </table>
 
-当前 v1.2.2 原生 SwiftUI 视图，使用隔离的示例数据；并非实时行情或真实持仓。
+v1.2.3 原生 SwiftUI 视图，使用隔离的示例数据；并非实时行情或真实持仓。
 
 ## 能做什么
 
@@ -31,21 +31,29 @@
 | **状态栏速览** | 仅图标、仅涨跌幅、涨跌幅＋现价三种模式，例如 `+3.00% · 103.00`；股票价格两位、ETF 三位小数。 |
 | **隐私与持仓** | 默认拼音代号，可自行修改；名称和持仓金额点眼睛才显示，收起即隐藏。支持成本、数量、当日估算与浮动盈亏，单项持仓可清空。 |
 | **三类提醒** | 涨跌幅、到达价格、持仓浮动盈亏（金额 / 百分比）；可选静默小点、macOS 通知或 Bark 推送。 |
-| **手机与手表** | Bark 可编辑标题和补充说明，默认固定信息只发代号、规则和时间；通过 iPhone 通知镜像送达 Apple Watch。 |
-| **快捷操作** | 自选排序、图钉切换关注项；自定义打开 / 收起、上一只 / 下一只全局快捷键。 |
-| **后台监测与更新** | 5–300 秒刷新，休市暂停、开市恢复；收起面板仍监测。应用内下载更新、原位替换重启，成功后清理旧包。 |
+| **手机与手表** | Bark 支持完整网址导入；标题跟随触发规则，显示真实股票名称，补充说明可编辑；通过 iPhone 通知镜像送达 Apple Watch。 |
+| **快捷操作** | 三组可自定义全局快捷键；面板内用方向键浏览、⌘1/⌘2 切换自选/持仓、⌘3 打开提醒，⌘K 查看完整清单。 |
+| **后台监测与更新** | 5–300 秒自动刷新，休市暂停、开市恢复；可随时手动刷新，收起面板仍监测。应用内下载更新、原位替换重启，成功后清理旧包。 |
 
-**v1.2.2 新增**：Bark 隐私通知与“涨跌幅＋现价”组合显示。[版本说明](docs/releases/v1.2.2.md)
+## v1.2.3 更新
+
+- **键盘操作**：选股、持仓、提醒、刷新与保存快捷操作，按键清单统一放在“显示与快捷键”。
+- **设置更清楚**：偏好分类、提醒通道单独设置；输入框支持复制粘贴，Bark 支持完整网址导入。
+- **刷新更自由**：休市也能手动获取行情，后台提醒仍按交易时段监测。
+- **Bark 更省心**：打开设置不弹钥匙串授权；标题与股票名称动态生成，测试使用当前关注项。
+
+[简短版本说明与安装包](https://github.com/ZeroClian/stockbar/releases/tag/v1.2.3) · [完整更新日志](CHANGELOG.md)
 
 <details>
-<summary>查看 Bark 模板与状态栏设置</summary>
+<summary>查看设置界面</summary>
 
-<table><tr><th>Bark 设置 · 原生组件展开</th><th>状态栏与快捷键</th></tr><tr>
-<td valign="top"><img src="docs/screenshots/bark-settings.png" width="280" alt="Bark 通知设置：可编辑文案、不可编辑的关键信息及示例预览"></td>
-<td valign="top"><img src="docs/screenshots/menu-settings.png" width="280" alt="涨跌幅加现价模式及三组全局快捷键"></td>
+<table><tr><th>分类设置</th><th>Bark 连接</th><th>显示与快捷键</th></tr><tr>
+<td valign="top"><img src="docs/screenshots/settings-index.png" width="280" alt="六个偏好分类入口"></td>
+<td valign="top"><img src="docs/screenshots/bark-settings.png" width="280" alt="Bark 完整网址导入与连接配置"></td>
+<td valign="top"><img src="docs/screenshots/menu-settings.png" width="280" alt="状态栏模式、全局快捷键及可滚动的面板快捷键清单"></td>
 </tr></table>
 
-Bark 图为偏好页组件的完整展开视图；实际小面板可滚动。[配置手机与手表](docs/INSTALL.md#bark-手机与手表通知)
+长内容在固定小面板内滚动。[配置手机与手表](docs/INSTALL.md#bark-手机与手表通知)
 
 </details>
 
@@ -57,7 +65,7 @@ Bark 图为偏好页组件的完整展开视图；实际小面板可滚动。[�
 2. 弹出 DMG，从应用程序打开；点击菜单栏鱼形 K 线标记，点 `＋` 添加股票或 ETF。
 3. 点击自选项录入持仓或设置提醒；偏好页选择状态栏模式、快捷键、刷新间隔和 Bark。
 
-从 v1.2.1 起，可在 **偏好 → 版本与更新 → 检查更新 → 立即更新** 升级。应用仅在点击后安装；请保留固定位置的一个副本。
+从 v1.2.1 起，可在 **偏好 → 版本更新 → 检查更新 → 立即更新** 升级。应用仅在点击后安装；请保留固定位置的一个副本。
 
 安装包采用 ad-hoc 签名，尚未 Apple 签名 / 公证。首次打开被阻止时，请按[安装指南](docs/INSTALL.md#首次打开被阻止)核对来源并操作。
 

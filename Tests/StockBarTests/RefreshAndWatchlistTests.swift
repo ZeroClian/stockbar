@@ -73,7 +73,7 @@ private func tempDirectory() -> URL { FileManager.default.temporaryDirectory.app
     #expect(scheduler.delay == 10)
     time.now = instant("2026-10-23T03:30:00Z")
     await scheduler.fire()
-    await store.refresh() // Manual action also respects the closed session.
+    await store.refresh() // Scheduled/background refresh still respects the closed session.
     #expect(await quotes.count == 1)
     #expect(scheduler.delay == 5400.0)
     time.now = instant("2026-10-23T05:00:00Z")
@@ -120,4 +120,39 @@ private func tempDirectory() -> URL { FileManager.default.temporaryDirectory.app
     try Data("{broken".utf8).write(to: file.url)
     store.moveItem("sz000001", offset: -1)
     #expect(store.state == beforeInvalid && !store.storageHealthy)
+}
+
+
+@MainActor @Test(arguments: ["2026-10-23T03:30:00Z", "2026-10-23T04:00:00Z", "2026-10-23T07:00:00Z", "2026-10-25T02:00:00Z", "2026-10-01T02:00:00Z", "2027-01-04T02:00:00Z"])
+func manualRefreshFetchesOutsideSessionWithoutAlertsOrBackgroundPolling(timestamp: String) async throws {
+    let directory = tempDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+    let file = StateFile(url: directory.appendingPathComponent("state.json"))
+    let initial = try initialState(delivery: .system); try file.save(initial)
+    let time = TestTime(); time.now = instant(timestamp)
+    let quotes = CountingQuotes(time.now), scheduler = ManualScheduler(), notifications = TestNotifications()
+    let store = AppStore(dataDirectory: directory, service: quotes, notifications: notifications, scheduler: scheduler, clock: { time.now })
+    store.start(); defer { store.stop() }
+    await scheduler.fire()
+    #expect(await quotes.count == 0)
+    await store.refresh(manually: true)
+    #expect(await quotes.count == 1 && store.quotes.count == 3)
+    #expect(store.quotes["sz300750"]?.last == 104)
+    #expect(store.state.delivered.isEmpty && store.state.unreadAlerts.isEmpty && notifications.sent == 0)
+    #expect(store.state.items == initial.items)
+    #expect((scheduler.delay ?? 0) > Double(store.state.refreshIntervalSeconds))
+    await store.refresh()
+    #expect(await quotes.count == 1)
+    let restored = AppStore(dataDirectory: directory, service: quotes, notifications: notifications, clock: { time.now })
+    #expect(restored.quotes["sz300750"]?.last == 104)
+}
+
+@MainActor @Test func manualRefreshDuringSessionStillMonitorsAndDeduplicates() async throws {
+    let directory = tempDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+    try StateFile(url: directory.appendingPathComponent("state.json")).save(initialState())
+    let now = instant("2026-10-23T02:00:00Z"), quotes = CountingQuotes(instant("2026-10-23T02:00:00Z"))
+    let store = AppStore(dataDirectory: directory, service: quotes, notifications: TestNotifications(), clock: { now })
+    await store.refresh(manually: true)
+    await store.refresh(manually: true)
+    #expect(await quotes.count == 2)
+    #expect(store.state.delivered.count == 3 && store.state.unreadAlerts.count == 3)
 }

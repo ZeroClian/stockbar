@@ -78,7 +78,7 @@ import StockCore
     #expect(try StateFile(url: directory.appendingPathComponent("state.json")).load().globalShortcut == shortcut)
     backend.tokens[0].press()
     #expect(toggles == 1)
-    store.route = .settings
+    store.route = .settingsPage(.appearance)
     store.isRecordingShortcut = true
     backend.tokens[0].press()
     #expect(toggles == 1 && !store.isRecordingShortcut)

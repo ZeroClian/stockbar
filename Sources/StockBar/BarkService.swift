@@ -3,15 +3,16 @@ import Security
 import StockCore
 
 @MainActor protocol BarkKeyStoring {
-    func read() throws -> String?
+    func read(allowInteraction: Bool) throws -> String?
     func write(_ key: String?) throws
 }
 
 enum BarkFailure: LocalizedError {
-    case keychain, missingKey, invalidKey, unavailable, rejected, oversized
+    case keychain, authorizationRequired, missingKey, invalidKey, unavailable, rejected, oversized
     var errorDescription: String? {
         switch self {
         case .keychain: return "无法访问 Bark 钥匙串，请允许 Tickfin 访问或重新保存密钥。"
+        case .authorizationRequired: return "Bark 密钥需要重新授权，请到偏好 → Bark 推送 → 连接点击保存；当前不会弹出授权框。"
         case .missingKey: return "请先在偏好 → Bark 推送中启用并保存设备密钥。"
         case .invalidKey: return "设备密钥格式无效，请只填写 Bark 设备密钥，不要填写整个推送网址。"
         case .unavailable: return "Bark 连接失败，稍后会重试仍满足条件的提醒。"
@@ -26,17 +27,26 @@ enum BarkFailure: LocalizedError {
 }
 
 @MainActor final class BarkKeychain: BarkKeyStoring {
+    typealias ReadRequest = ([String: Any]) -> (OSStatus, Data?)
+    private let request: ReadRequest
+    init(request: @escaping ReadRequest = { query in
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        return (status, item as? Data)
+    }) { self.request = request }
+
     private var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "local.stockbar.app.bark", kSecAttrAccount as String: "device-key"]
     }
-    func read() throws -> String? {
+    func read(allowInteraction: Bool) throws -> String? {
         var request = query
+        request[kSecUseAuthenticationUI as String] = allowInteraction ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(request as CFDictionary, &item)
+        let (status, data) = self.request(request)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = item as? Data, let key = String(data: data, encoding: .utf8) else { throw BarkFailure.keychain }
+        if !allowInteraction && status != errSecSuccess { throw BarkFailure.authorizationRequired }
+        guard status == errSecSuccess, let data, let key = String(data: data, encoding: .utf8) else { throw BarkFailure.keychain }
         return key
     }
     func write(_ key: String?) throws {

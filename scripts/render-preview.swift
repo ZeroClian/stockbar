@@ -22,7 +22,7 @@ struct PreviewQuotes: QuoteProviding {
 }
 
 @MainActor final class PreviewBarkKeys: BarkKeyStoring {
-    func read() throws -> String? { "preview-key" }
+    func read(allowInteraction: Bool) throws -> String? { "preview-key" }
     func write(_ key: String?) throws {}
 }
 
@@ -65,7 +65,7 @@ struct PreviewQuotes: QuoteProviding {
         state.previousStockShortcut = GlobalShortcut(keyCode: 123, modifiers: [.control, .option])
         state.nextStockShortcut = GlobalShortcut(keyCode: 124, modifiers: [.control, .option])
         try StateFile(url: data.appendingPathComponent("state.json")).save(state)
-        let store = AppStore(dataDirectory: data, service: PreviewQuotes(values: quotes), notifications: PreviewNotifications(), shortcutBackend: PreviewShortcutBackend(), updateChecker: UpdateChecker(currentVersion: "1.2.2"), barkSender: PreviewBarkSender(), barkKeys: PreviewBarkKeys(), clock: { stamp })
+        let store = AppStore(dataDirectory: data, service: PreviewQuotes(values: quotes), notifications: PreviewNotifications(), shortcutBackend: PreviewShortcutBackend(), updateChecker: UpdateChecker(currentVersion: "1.2.3"), barkSender: PreviewBarkSender(), barkKeys: PreviewBarkKeys(), clock: { stamp })
         await store.refresh()
 
 
@@ -105,9 +105,18 @@ struct PreviewQuotes: QuoteProviding {
         _ = try await render("price-alerts", store: store, reuse: shared)
         store.resetPrivacy()
         store.route = .settings
-        _ = try await render("menu-settings", store: store, reuse: shared)
+        // Render the full index independently so an offscreen route transition cannot retain
+        // the preceding editor's viewport height in the documentation image.
+        let settings = NSHostingView(rootView: AnyView(SettingsView(store: store)
+            .frame(width: 280).background(UI.background)))
+        _ = try await render("settings-index", store: store, reuse: settings)
+        store.route = .settingsPage(.appearance)
+        let menu = NSHostingView(rootView: AnyView(ScrollView(.vertical, showsIndicators: false) {
+            SettingsView(store: store, section: .appearance).fixedSize(horizontal: false, vertical: true)
+        }.frame(width: 280, height: 420).background(UI.background)))
+        _ = try await render("menu-settings", store: store, reuse: menu)
         store.refreshBarkStatus()
-        let bark = NSHostingView(rootView: AnyView(BarkSettingsView(store: store, expanded: .constant(true))
+        let bark = NSHostingView(rootView: AnyView(BarkSettingsView(store: store)
             .font(.system(size: 11)).controlSize(.small).padding(12).frame(width: 280).background(UI.background)))
         _ = try await render("bark-settings", store: store, reuse: bark)
         print("Documentation previews rendered from real SwiftUI views with isolated sample data; no network pushes.")

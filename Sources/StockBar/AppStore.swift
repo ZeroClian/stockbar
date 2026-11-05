@@ -4,11 +4,11 @@ import Foundation
 import UserNotifications
 import StockCore
 
-enum PanelRoute: Equatable {
-    case home, add, edit(String, Bool), settings, details, inbox, sorting
+enum PanelRoute: Hashable {
+    case home, add, edit(String, Bool), settings, settingsPage(SettingsSection), details, inbox, sorting
 }
 
-enum SettingsSection: Hashable { case refresh, notifications, bark, updates, data }
+enum SettingsSection: Hashable { case appearance, refresh, notifications, bark, updates, data }
 
 /// Display-only policy. Alert eligibility remains governed by MarketClock.isFresh.
 enum QuoteDisplayPolicy {
@@ -49,13 +49,13 @@ final class AppStore: ObservableObject {
     }
     @Published var isRecordingShortcut = false
     @Published var recordingShortcutAction: ShortcutAction = .togglePanel
-    @Published var expandedSettings: Set<SettingsSection> = []
     @Published private(set) var shortcutError: String?
     let updateChecker: UpdateChecker
     let shortcutManager: GlobalShortcutManager
     let previousShortcutManager: GlobalShortcutManager
     let nextShortcutManager: GlobalShortcutManager
     var onShortcutToggle: (() -> Void)?
+    @Published var keyboardSelection: String?
     @Published var showHoldings = false
     @Published var revealed = false
     @Published var panelHeightLimit: CGFloat = 420
@@ -69,6 +69,7 @@ final class AppStore: ObservableObject {
     private let notifications: any NotificationSending
     private let barkSender: any BarkSending
     private let barkKeys: any BarkKeyStoring
+    private var cachedBarkKey: String?
     private var barkRetryAfter: [String: Date] = [:]
     private let clock: () -> Date
     private let scheduler: any RefreshScheduling
@@ -168,13 +169,13 @@ final class AppStore: ObservableObject {
         return TradingSchedule.isOpen(now) ? "交易时段" : "休市"
     }
     var refreshDescription: String {
-        guard TradingSchedule.isCalendarSupported(now) else { return "交易日历未覆盖当前年份，监测已暂停，请检查新版。" }
-        return TradingSchedule.isOpen(now) ? "每 \(state.refreshIntervalSeconds) 秒监测，收起面板后继续。" : "休市暂停刷新，开市自动恢复监测。"
+        guard TradingSchedule.isCalendarSupported(now) else { return "交易日历未覆盖当前年份，自动监测已暂停，可手动获取行情，请检查新版。" }
+        return TradingSchedule.isOpen(now) ? "每 \(state.refreshIntervalSeconds) 秒监测，收起面板后继续。" : "休市暂停自动刷新，可手动获取行情；开市自动恢复监测。"
     }
     var latestTime: Date? { state.items.compactMap { quotes[$0.id]?.timestamp }.min() }
     var hasUnreadAlerts: Bool { previewDot || !state.unreadAlerts.isEmpty }
     func displayName(_ item: WatchItem) -> String { revealed ? item.name : (state.aliases[item.id] ?? "—") }
-    func resetPrivacy() { isRecordingShortcut = false; expandedSettings = []; revealed = false; route = .home; message = nil }
+    func resetPrivacy() { keyboardSelection = nil; isRecordingShortcut = false; revealed = false; route = .home; message = nil }
     func closePanel() { resetPrivacy(); NotificationCenter.default.post(name: .closeStockPanel, object: nil) }
     func acknowledgeAlerts() {
         var next = state
@@ -204,11 +205,11 @@ final class AppStore: ObservableObject {
         return "\(UI.number(q.percent, signed: true))%\(price)\(isOld(item.id) ? " · 旧" : "")"
     }
 
-    func refresh() async {
+    func refresh(manually: Bool = false) async {
         guard !isRefreshing else { return }
         now = clock()
         defer { scheduleNextRefresh() }
-        guard TradingSchedule.isOpen(now) else { return }
+        guard manually || TradingSchedule.isOpen(now) else { return }
         let requested = state.items.map(\.symbol)
         guard !requested.isEmpty else { return }
         isRefreshing = true
@@ -339,22 +340,24 @@ final class AppStore: ObservableObject {
     }
 
     func refreshBarkStatus() {
-        do { hasBarkKey = try barkKeys.read() != nil }
-        catch { self.error = error.localizedDescription }
+        // Opening settings must never access Keychain or trigger authentication.
+        hasBarkKey = cachedBarkKey != nil
     }
 
     @discardableResult func saveBarkSettings(_ configuration: BarkConfiguration, newKey: String) -> Bool {
         guard storageHealthy else { return false }
         var oldKey: String?
         var changedKey = false
+        var resolvedKey = cachedBarkKey
         do {
             try configuration.validate()
             let key = newKey.trimmingCharacters(in: .whitespacesAndNewlines)
             if !key.isEmpty || configuration.enabled {
-                oldKey = try barkKeys.read()
+                oldKey = try cachedBarkKey ?? barkKeys.read(allowInteraction: true)
                 let effective = key.isEmpty ? oldKey : key
                 guard let effective else { throw BarkFailure.missingKey }
                 try BarkFailure.validateKey(effective)
+                resolvedKey = effective
                 if !key.isEmpty { try barkKeys.write(key); changedKey = true }
             }
             var next = state; next.bark = configuration
@@ -362,7 +365,8 @@ final class AppStore: ObservableObject {
                 if changedKey { try barkKeys.write(oldKey) }
                 return false
             }
-            if changedKey || configuration.enabled { hasBarkKey = true }
+            cachedBarkKey = resolvedKey
+            hasBarkKey = resolvedKey != nil
             barkRetryAfter.removeAll()
             message = configuration.enabled ? "Bark 已保存；在各自选项的提醒方式中选择 Bark 后生效。" : "Bark 已关闭；使用 Bark 的提醒暂停推送。"
             return true
@@ -372,13 +376,17 @@ final class AppStore: ObservableObject {
     func removeBarkKey() {
         var next = state; next.bark.enabled = false
         guard commit(next) else { return }
-        do { try barkKeys.write(nil); hasBarkKey = false; barkRetryAfter.removeAll(); message = "Bark 已关闭，设备密钥已删除。" }
+        cachedBarkKey = nil; hasBarkKey = false
+        do { try barkKeys.write(nil); barkRetryAfter.removeAll(); message = "Bark 已关闭，设备密钥已删除。" }
         catch { self.error = error.localizedDescription }
     }
 
     private func configuredBarkKey() throws -> String {
-        guard state.bark.enabled, let key = try barkKeys.read() else { throw BarkFailure.missingKey }
+        guard state.bark.enabled else { throw BarkFailure.missingKey }
+        if let key = cachedBarkKey { return key }
+        guard let key = try barkKeys.read(allowInteraction: false) else { hasBarkKey = false; throw BarkFailure.missingKey }
         try BarkFailure.validateKey(key)
+        cachedBarkKey = key; hasBarkKey = true
         return key
     }
 
@@ -387,7 +395,9 @@ final class AppStore: ObservableObject {
         guard !Task.isCancelled, storageHealthy else { return }
         do {
             let key = try configuredBarkKey()
-            let message = try BarkPreview.message(configuration: state.bark, test: true)
+            let item = state.items.first(where: { $0.id == state.pinnedSymbol }) ?? state.items.first
+            let quote = item.flatMap { quotes[$0.id] }
+            let message = try BarkMessage(testConfiguration: state.bark, symbol: item?.symbol, quote: quote, name: item?.name)
             guard !Task.isCancelled, revision == navigationRevision else { return }
             try await barkSender.send(configuration: state.bark, key: key, message: message)
             guard !Task.isCancelled, revision == navigationRevision else { return }
@@ -508,7 +518,7 @@ final class AppStore: ObservableObject {
     }
 
     private func processAlerts(_ freshQuotes: [String: Quote]) async {
-        guard storageHealthy, !processingAlerts else { return }
+        guard storageHealthy, !processingAlerts, TradingSchedule.isOpen(clock()) else { return }
         processingAlerts = true
         defer { processingAlerts = false }
         let candidates = AlertEvaluator.candidates(items: state.items, quotes: freshQuotes, delivered: state.delivered, now: clock())
@@ -535,7 +545,7 @@ final class AppStore: ObservableObject {
                 if delivery == .bark {
                     guard let quote = freshQuotes[candidate.symbol.rawValue] else { continue }
                     let key = try configuredBarkKey()
-                    let message = try BarkMessage(configuration: state.bark, alias: state.aliases[candidate.symbol.rawValue] ?? "自选项", candidate: currentCandidate, quote: quote)
+                    let message = try BarkMessage(configuration: state.bark, candidate: currentCandidate, quote: quote)
                     try await barkSender.send(configuration: state.bark, key: key, message: message)
                     barkRetryAfter.removeValue(forKey: candidate.key)
                 }

@@ -4,17 +4,16 @@ import AppKit
 struct UpdateSettingsView: View {
     @ObservedObject var checker: UpdateChecker
     @ObservedObject private var updater: AppUpdater
-    @Binding private var isExpanded: Bool
     @Environment(\.openURL) private var openURL
 
-    init(checker: UpdateChecker, expanded: Binding<Bool>) {
+    init(checker: UpdateChecker) {
         self.checker = checker
         self.updater = checker.updater
-        _isExpanded = expanded
     }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("当前版本 · " + checker.currentVersion).font(.system(size: 11))
             VStack(alignment: .leading, spacing: 7) {
                 Text(statusText)
                     .font(.system(size: 10)).foregroundColor(.secondary)
@@ -50,13 +49,6 @@ struct UpdateSettingsView: View {
                 Button("显示当前应用位置") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
                     .controlSize(.small)
             }.padding(.top, 5).frame(maxWidth: .infinity, alignment: .leading)
-        } label: {
-            HStack(spacing: 5) {
-                Text("版本与更新")
-                Spacer(minLength: 0)
-                Text(checker.currentVersion).foregroundColor(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
-            }.font(.system(size: 11))
         }
     }
 

@@ -7,10 +7,11 @@ struct PanelHeader: View {
     let title: String
     let subtitle: String
     var showPrivacy = false
+    var backRoute: PanelRoute = .home
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
-                IconButton(symbol: "chevron.left", label: "返回速览") { store.route = .home }
+                IconButton(symbol: "chevron.left", label: backRoute == .home ? "返回速览" : "返回偏好") { store.route = backRoute }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.system(size: 12, weight: .medium)).lineLimit(1)
                     if !subtitle.isEmpty {
@@ -188,7 +189,7 @@ struct StockEditor: View {
                     Spacer(minLength: 0)
                     if saving { ProgressView().controlSize(.mini) }
                     Button("取消") { store.route = .home }
-                    Button("保存") { save() }.disabled(saving || !store.storageHealthy)
+                    Button("保存") { save() }.keyboardShortcut("s", modifiers: .command).disabled(saving || !store.storageHealthy)
                 }.padding(.top, 2)
             }.font(.system(size: 11)).controlSize(.small).padding(12)
         }
@@ -250,7 +251,7 @@ struct StockEditor: View {
     private var alertForm: some View {
         Group {
             Picker("提醒条件", selection: $alertSection) {
-                Text("涨跌幅").tag(0); Text("价格").tag(1); Text("盈亏").tag(2)
+                Text("涨跌幅").tag(0); Text("价格").tag(1); Text("盈亏").tag(2); Text("设置").tag(3)
             }.pickerStyle(.segmented).labelsHidden()
             if alertSection == 0 {
                 threshold("上涨达到", enabled: $upEnabled, value: $up)
@@ -258,7 +259,7 @@ struct StockEditor: View {
             } else if alertSection == 1 {
                 threshold("价格涨到", enabled: $priceRule.aboveEnabled, value: $abovePrice, unit: "元")
                 threshold("价格跌到", enabled: $priceRule.belowEnabled, value: $belowPrice, unit: "元")
-            } else {
+            } else if alertSection == 2 {
                 if store.revealed {
                     Picker("浮动盈亏", selection: $holdingRule.unit) {
                         Text("金额（元）").tag(HoldingAlertUnit.amount)
@@ -272,17 +273,20 @@ struct StockEditor: View {
             }
             Text(enabledAlertSummary).font(.system(size: 9)).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Picker("提醒方式", selection: $delivery) {
-                Text("静默小点").tag(AlertDelivery.silent)
-                Text("系统通知").tag(AlertDelivery.system)
-                Text("Bark 推送").tag(AlertDelivery.bark)
-            }
-            Text(delivery == .silent ? "只亮小点，无横幅、无声音。" : delivery == .bark ? "需在偏好中启用 Bark；发送已配置模板，并保留本机未读提醒。" : "需系统通知权限；通知使用代号，不含金额。")
-                .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-            DisclosureGroup("触发规则") {
-                Text("每条规则每天一次。达到或越过阈值即满足；保存后已达标会在下一次有效行情提醒。三类条件可同时启用。盈亏按此项持仓的浮动盈亏判断，亏损阈值填正数；数量或成本为零时暂停。收起面板继续监测；休眠、休市、旧行情不提醒。")
-                    .font(.system(size: 10)).foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true).padding(.top, 3)
+            if alertSection == 3 {
+                Text("适用于本自选项的三类提醒").font(.system(size: 10)).foregroundColor(.secondary)
+                Picker("提醒方式", selection: $delivery) {
+                    Text("静默小点").tag(AlertDelivery.silent)
+                    Text("系统通知").tag(AlertDelivery.system)
+                    Text("Bark 推送").tag(AlertDelivery.bark)
+                }
+                Text(delivery == .silent ? "只亮小点，无横幅、无声音。" : delivery == .bark ? "需在偏好中启用 Bark；发送已配置模板，并保留本机未读提醒。" : "需系统通知权限；通知使用代号，不含金额。")
+                    .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                DisclosureGroup("触发规则") {
+                    Text("每条规则每天一次。达到或越过阈值即满足；保存后已达标会在下一次有效行情提醒。三类条件可同时启用。盈亏按此项持仓的浮动盈亏判断，亏损阈值填正数；数量或成本为零时暂停。收起面板继续监测；休眠、休市、旧行情不提醒。")
+                        .font(.system(size: 10)).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).padding(.top, 3)
+                }
             }
         }
     }
@@ -334,55 +338,103 @@ struct StockEditor: View {
     }
 }
 
+extension SettingsSection {
+    var title: String {
+        switch self {
+        case .appearance: return "显示与快捷键"
+        case .refresh: return "行情刷新"
+        case .notifications: return "提醒通知"
+        case .bark: return "Bark 推送"
+        case .updates: return "版本更新"
+        case .data: return "数据与说明"
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var store: AppStore
+    var section: SettingsSection? = nil
     @ViewState private var testing = false
     @ViewState private var testTask: Task<Void, Never>?
     var body: some View {
         VStack(spacing: 0) {
-            PanelHeader(store: store, title: "偏好", subtitle: "")
+            PanelHeader(store: store, title: section?.title ?? "偏好", subtitle: "",
+                        backRoute: section == nil ? .home : .settings)
             VStack(alignment: .leading, spacing: 10) {
-                Picker("状态栏", selection: Binding(get: { store.state.menuMode == .dailyProfit ? MenuMode.icon : store.state.menuMode }, set: { store.saveSettings(mode: $0) })) {
-                    Text("仅图标").tag(MenuMode.icon)
-                    Text("仅涨跌幅").tag(MenuMode.stock)
-                    Text("涨跌幅＋现价").tag(MenuMode.stockPrice)
-                }.disabled(!store.storageHealthy)
-                Text("名称默认代号，金额默认隐藏。\n收起后恢复隐藏；按 Esc 可立即收起。")
-                    .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                ShortcutSettingsView(store: store)
-                RefreshSettingsView(store: store, expanded: expansion(.refresh))
-                HStack {
-                    Button("测试小点") { store.previewDot = true; store.message = "静默测试：状态栏已亮小点，没有发送系统通知。" }
-                    Button("查看提醒") { store.route = .inbox }
-                    Spacer(minLength: 0)
-                }
-                Divider()
-                DisclosureGroup("系统通知 · " + permissionText, isExpanded: expansion(.notifications)) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("仅对主动选择系统通知的自选项发送。专注模式可能影响横幅。")
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack {
-                            Button("测试通知") { testing = true; testTask = Task { await store.testNotification(); testing = false } }.disabled(testing)
-                            Button("通知设置") { store.openNotificationSettings() }
-                        }
-                    }.font(.system(size: 10)).padding(.top, 6)
-                }
-                BarkSettingsView(store: store, expanded: expansion(.bark))
-                UpdateSettingsView(checker: store.updateChecker, expanded: expansion(.updates))
-                DisclosureGroup("数据与说明", isExpanded: expansion(.data)) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("收起面板不影响交易时段内的提醒监测；休眠或退出后停止监测。持仓与行情缓存仅保存在本机，行情可能延迟，以券商数据为准。")
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button("查看数据文件") { store.revealData() }
-                    }.font(.system(size: 10)).padding(.top, 6)
-                }
-                HStack {
-                    Button("刷新") { Task { await store.refresh() } }.disabled(store.isRefreshing || !TradingSchedule.isOpen(store.now))
-                    Spacer()
-                    Button("退出") { NSApp.terminate(nil) }
+                if let section {
+                    settingsContent(section)
+                } else {
+                    entry(.appearance, icon: "keyboard", detail: "状态栏模式 · 完整快捷键清单")
+                    entry(.refresh, icon: "arrow.clockwise", detail: "\(store.state.refreshIntervalSeconds) 秒 · 休市暂停")
+                    entry(.notifications, icon: "bell", detail: "静默小点 · 系统通知")
+                    entry(.bark, icon: "iphone", detail: store.state.bark.enabled ? "已启用 · 连接与模板" : "手机与手表 · 未启用")
+                    entry(.updates, icon: "arrow.down.circle", detail: "当前版本 " + store.updateChecker.currentVersion)
+                    entry(.data, icon: "internaldrive", detail: "本地数据 · 使用说明")
+                    Divider()
+                    HStack {
+                        Text("Tickfin").foregroundColor(.secondary)
+                        Spacer()
+                        Button("退出") { NSApp.terminate(nil) }
+                    }
                 }
             }.font(.system(size: 11)).controlSize(.small).padding(12)
-        }.task { await store.updatePermission() }.onDisappear { testTask?.cancel() }
+        }.task { if section == .notifications { await store.updatePermission() } }
+            .onDisappear { testTask?.cancel() }
+    }
+    private func entry(_ section: SettingsSection, icon: String, detail: String) -> some View {
+        Button {
+            store.message = nil; store.route = .settingsPage(section)
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: icon).frame(width: 18).foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(section.title)
+                    Text(detail).font(.system(size: 10)).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 9)).foregroundColor(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+    @ViewBuilder private func settingsContent(_ section: SettingsSection) -> some View {
+        switch section {
+        case .appearance:
+            Picker("状态栏", selection: Binding(get: { store.state.menuMode == .dailyProfit ? MenuMode.icon : store.state.menuMode }, set: { store.saveSettings(mode: $0) })) {
+                Text("仅图标").tag(MenuMode.icon)
+                Text("仅涨跌幅").tag(MenuMode.stock)
+                Text("涨跌幅＋现价").tag(MenuMode.stockPrice)
+            }.disabled(!store.storageHealthy)
+            Text("名称默认代号，金额默认隐藏。\n收起后恢复隐藏；按 Esc 可立即收起。")
+                .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            Divider()
+            ShortcutSettingsView(store: store)
+        case .refresh:
+            RefreshSettingsView(store: store)
+            Button(store.isRefreshing ? "刷新中…" : "立即刷新") { Task { await store.refresh(manually: true) } }
+                .disabled(store.isRefreshing || store.state.items.isEmpty)
+        case .notifications:
+            Text("静默提醒").fontWeight(.medium)
+            HStack {
+                Button("测试小点") { store.previewDot = true; store.message = "静默测试：状态栏已亮小点，没有发送系统通知。" }
+                Button("查看提醒") { store.route = .inbox }
+            }
+            Divider()
+            Text("系统通知 · " + permissionText).fontWeight(.medium)
+            Text("仅对主动选择系统通知的自选项发送。专注模式可能影响横幅。")
+                .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("测试通知") { testing = true; testTask = Task { await store.testNotification(); testing = false } }.disabled(testing)
+                Button("通知设置") { store.openNotificationSettings() }
+            }
+        case .bark:
+            BarkSettingsView(store: store)
+        case .updates:
+            UpdateSettingsView(checker: store.updateChecker)
+        case .data:
+            Text("收起面板不影响交易时段内的提醒监测；休眠或退出后停止监测。持仓与行情缓存仅保存在本机，行情可能延迟，以券商数据为准。")
+                .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            Button("查看数据文件") { store.revealData() }
+        }
     }
     private var permissionText: String {
         switch store.notificationStatus {
@@ -391,24 +443,14 @@ struct SettingsView: View {
         default: return "未申请"
         }
     }
-    private func expansion(_ section: SettingsSection) -> Binding<Bool> {
-        Binding(get: { store.expandedSettings.contains(section) }, set: { expanded in
-            if expanded { store.expandedSettings.insert(section) }
-            else { store.expandedSettings.remove(section) }
-        })
-    }
 }
 
 struct RefreshSettingsView: View {
     @ObservedObject var store: AppStore
     @ViewState private var interval = ""
-    @Binding private var isExpanded: Bool
-    init(store: AppStore, expanded: Binding<Bool>) {
-        self.store = store
-        _isExpanded = expanded
-    }
     var body: some View {
-        DisclosureGroup("刷新 · \(store.state.refreshIntervalSeconds) 秒", isExpanded: $isExpanded) {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("当前间隔 · \(store.state.refreshIntervalSeconds) 秒")
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 6) {
                     TextField("5–300", text: $interval).frame(width: 58)
@@ -420,7 +462,7 @@ struct RefreshSettingsView: View {
                         .disabled(!store.storageHealthy)
                 }
                 Text(store.refreshDescription)
-                Text("5–300 秒；间隔越长，提醒可能越晚。午休、周末和节假日不刷新；添加自选时仍会查询验证代码。")
+                Text("5–300 秒；间隔越长，提醒可能越晚。午休、周末和节假日暂停自动刷新；手动刷新不受时段限制。")
                 Text("内置 2026 年交易日历，超出范围会暂停并提示更新。")
             }.font(.system(size: 10)).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true).padding(.top, 6)

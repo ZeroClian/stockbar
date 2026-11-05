@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var titleSubscription: AnyCancellable?
     private var panelObserver: NSObjectProtocol?
     private var closeObserver: NSObjectProtocol?
+    private var keyboardMonitor: Any?
     private lazy var normalIcon = makeStatusIcon(unread: false)
     private lazy var unreadIcon = makeStatusIcon(unread: true)
     private lazy var brandMark: NSImage = {
@@ -32,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NSApp.mainMenu = AppEditMenu.make()
         let args = CommandLine.arguments
         let customDirectory: URL?
         if let flag = args.firstIndex(of: "--data-dir"), flag + 1 < args.count {
@@ -62,6 +64,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         let host = NSHostingController(rootView: PanelView(store: store))
         popover.contentViewController = host
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.popover.isShown, NSApp.isActive,
+                  let window = self.popover.contentViewController?.view.window,
+                  NSApp.keyWindow === window, window.attachedSheet == nil,
+                  NSApp.modalWindow == nil else { return event }
+            let responder = window.firstResponder
+            let editingText = responder is NSTextView || responder is NSTextField
+            return self.store.handlePanelKey(event, editingText: editingText) ? nil : event
+        }
         titleSubscription = store.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.updateTitle(); self?.resizePanel() }
         }
@@ -104,7 +115,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         store?.updateChecker.updater.shouldTerminate() == false ? .terminateCancel : .terminateNow
     }
-    func applicationWillTerminate(_ notification: Notification) { store?.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        if let keyboardMonitor { NSEvent.removeMonitor(keyboardMonitor) }
+        store?.stop()
+    }
     func popoverDidClose(_ notification: Notification) { store.resetPrivacy() }
     func applicationDidResignActive(_ notification: Notification) {
         if popover?.isShown == true { store.resetPrivacy(); popover.performClose(nil) }
