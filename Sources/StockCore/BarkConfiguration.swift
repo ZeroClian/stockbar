@@ -6,7 +6,7 @@ public struct BarkConfiguration: Codable, Equatable, Sendable {
     public var server = "https://api.day.app"
     public var title = "自选提醒" // Legacy preference retained for saved-state compatibility; notification titles follow the rule.
     public var note = "打开 Tickfin 查看。"
-    public var includeValues = false
+    public var includeValues = true // Legacy field retained for decoding; formal notifications always include values.
     public init() {}
 
     public var endpoint: URL? {
@@ -45,13 +45,14 @@ public struct BarkMessage: Equatable, Sendable {
         note = configuration.note
         var lines = ["股票名称：\(quote.name)", "触发规则：\(key.kind.label)"]
         if test { lines.insert("测试通知 · 示例数据，非真实触发", at: 0) }
-        if configuration.includeValues {
-            let digits = key.kind.isPrice ? quote.symbol.priceFractionDigits : 2
-            let unit = key.kind.usesPercent ? "%" : "元"
-            let negative = [AlertKind.down, .lossAmount, .lossPercent].contains(key.kind)
-            let threshold = negative ? -key.threshold : key.threshold
-            lines += ["设置阈值：\(Self.number(threshold, digits: digits))\(unit)",
-                      "触发数值：\(Self.number(value, digits: digits))\(unit)"]
+        let digits = key.kind.isPrice ? quote.symbol.priceFractionDigits : 2
+        let unit = key.kind.usesPercent ? "%" : "元"
+        let negative = [AlertKind.down, .lossAmount, .lossPercent].contains(key.kind)
+        let threshold = negative ? -key.threshold : key.threshold
+        lines += ["设置阈值：\(Self.number(threshold, digits: digits))\(unit)",
+                  "触发数值：\(Self.number(value, digits: digits))\(unit)"]
+        if !key.kind.isPrice {
+            lines.append("当前价格：\(Self.number(quote.last, digits: quote.symbol.priceFractionDigits))元")
         }
         facts = lines.joined(separator: "\n")
     }

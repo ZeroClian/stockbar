@@ -58,10 +58,9 @@ struct BarkSettingsView: View {
                     TextEditor(text: $draft.note).font(.system(size: 11)).frame(height: 48)
                         .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.25)))
                         .accessibilityLabel("Bark 可编辑补充说明")
-                    Toggle("发送阈值和触发数值", isOn: $draft.includeValues)
-                    Text(draft.includeValues ? "包含实际价格或持仓盈亏，将经 Bark 服务发送到手机。" : "发送真实股票名称和规则类型，不显示行情时间。")
+                    Text("正式通知固定包含设置阈值和触发数值，按规则显示价格、涨跌幅或持仓盈亏；非价格提醒同时附上当前价格。")
                         .foregroundColor(.secondary)
-                    Text("关键信息由程序生成，不能编辑或删除；关闭数值时保留其余固定信息。")
+                    Text("关键信息由程序生成，不能编辑或删除；价格或盈亏数值将经 Bark 服务发送到手机。")
                         .foregroundColor(.secondary)
                     if let preview = try? BarkPreview.message(configuration: draft) {
                         DisclosureGroup("预览 · 示例数据") {

@@ -23,9 +23,10 @@ import Testing
     #expect(second.body.hasPrefix("股票名称：创业板ETF\n触发规则：跌到价格\n设置阈值：2.660元\n触发数值：2.651元"))
     #expect(second.body.hasSuffix("检查一下。{价格}"))
     config.includeValues = false
-    let hidden = try BarkMessage(configuration: config, candidate: candidate, quote: quote)
-    #expect(!hidden.facts.contains("2.66") && !hidden.facts.contains("2.651"))
-    #expect(!hidden.facts.contains("行情时间") && hidden.body.contains("创业板ETF"))
+    let legacy = try JSONDecoder().decode(BarkConfiguration.self, from: JSONEncoder().encode(config))
+    let restored = try BarkMessage(configuration: legacy, candidate: candidate, quote: quote)
+    #expect(restored.facts == first.facts) // Old opt-out settings cannot suppress required values.
+    #expect(!restored.facts.contains("行情时间"))
 }
 
 @Test func barkPreferencesRoundTripAndOldStateDefaultsToDisabled() throws {
@@ -77,4 +78,23 @@ import Testing
     #expect(!message.body.contains("行情时间") && message.title == "测试 · 推送测试")
     let mismatch = try BarkMessage(testConfiguration: config, symbol: StockSymbol("600519"), quote: quote)
     #expect(mismatch.facts.contains("股票代码：600519\n当前价格：xxxx"))
+}
+
+@Test(arguments: ["up", "down", "priceAbove", "priceBelow", "profitAmount", "lossAmount", "profitPercent", "lossPercent"])
+func barkFormalMessagesAlwaysIncludeRuleValues(kind: String) throws {
+    let symbol = try StockSymbol("600519")
+    let negative = ["down", "lossAmount", "lossPercent"].contains(kind)
+    let price = kind == "priceAbove" || kind == "priceBelow"
+    let percent = ["up", "down", "profitPercent", "lossPercent"].contains(kind)
+    let threshold = price ? 100 : 3
+    let value: Decimal = price ? (kind == "priceAbove" ? 103 : 97) : (negative ? -4 : 4)
+    let quote = Quote(symbol: symbol, name: "贵州茅台", last: price ? value : 103, previousClose: 100, percent: 3, timestamp: Date())
+    let candidate = AlertCandidate(key: "sh600519|\(kind)|\(threshold)", day: "2026-11-06", symbol: symbol, title: "", body: "", value: value)
+    var config = BarkConfiguration(); config.includeValues = false
+    let message = try BarkMessage(configuration: config, candidate: candidate, quote: quote)
+    let unit = percent ? "%" : "元"
+    #expect(message.facts.contains("设置阈值：\(negative ? "-" : "")\(threshold).00\(unit)"))
+    #expect(message.facts.contains("触发数值：\(value).00\(unit)"))
+    if !price { #expect(message.facts.contains("当前价格：103.00元")) }
+    #expect(!message.facts.contains("行情时间"))
 }
